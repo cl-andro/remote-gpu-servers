@@ -62,10 +62,30 @@ def resolve_url(explicit: str | None) -> str:
     return url.rstrip("/")
 
 
+def auth_headers() -> dict[str, str]:
+    headers = {}
+    user = os.environ.get("CLUSTER_AUTH_USER")
+    passwd = os.environ.get("CLUSTER_AUTH_PASS")
+    api_key = os.environ.get("CLUSTER_API_KEY")
+    if user and passwd:
+        import base64
+        token = base64.b64encode(f"{user}:{passwd}".encode()).decode()
+        headers["Authorization"] = f"Basic {token}"
+    elif api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def authed_request(url: str, data: bytes | None = None, headers: dict | None = None, method: str | None = None) -> urllib.request.Request:
+    h = dict(headers or {})
+    h.update(auth_headers())
+    return urllib.request.Request(url, data=data, headers=h, method=method)
+
+
 def post_stream(url: str, payload: dict, show_reasoning: bool = True) -> None:
     """Streaming SSE request to an OpenAI-compatible endpoint."""
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(
+    req = authed_request(
         url, data=data, headers={"Content-Type": "application/json"}, method="POST"
     )
     thinking = False
@@ -111,25 +131,25 @@ def post_stream(url: str, payload: dict, show_reasoning: bool = True) -> None:
 
 def cmd_health(a) -> None:
     url = resolve_url(a.url)
-    with urllib.request.urlopen(f"{url}/health", timeout=30) as r:
+    with urllib.request.urlopen(authed_request(f"{url}/health"), timeout=30) as r:
         print(f"{GREEN}{r.status}{RESET} {r.read().decode()}")
 
 
 def cmd_props(a) -> None:
     url = resolve_url(a.url)
-    with urllib.request.urlopen(f"{url}/props", timeout=30) as r:
+    with urllib.request.urlopen(authed_request(f"{url}/props"), timeout=30) as r:
         print(json.dumps(json.load(r), indent=2))
 
 
 def cmd_models(a) -> None:
     url = resolve_url(a.url)
-    with urllib.request.urlopen(f"{url}/v1/models", timeout=30) as r:
+    with urllib.request.urlopen(authed_request(f"{url}/v1/models"), timeout=30) as r:
         print(json.dumps(json.load(r), indent=2))
 
 
 def cmd_slots(a) -> None:
     url = resolve_url(a.url)
-    with urllib.request.urlopen(f"{url}/slots", timeout=30) as r:
+    with urllib.request.urlopen(authed_request(f"{url}/slots"), timeout=30) as r:
         print(json.dumps(json.load(r), indent=2))
 
 
@@ -188,7 +208,7 @@ def cmd_tools(a) -> None:
         "chat_template_kwargs": {"enable_thinking": False},
         "stream": False,
     }
-    req = urllib.request.Request(
+    req = authed_request(
         url + "/v1/chat/completions",
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
@@ -209,7 +229,7 @@ def cmd_tools(a) -> None:
 def cmd_tokenize(a) -> None:
     url = resolve_url(a.url)
     payload = {"content": a.text, "add_special": False}
-    req = urllib.request.Request(
+    req = authed_request(
         url + "/tokenize",
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
@@ -237,7 +257,7 @@ def cmd_gen(a) -> None:
 
     print(f"{CYAN}generating image{RESET} ({payload['size']}) -> {a.out} ...")
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(
+    req = authed_request(
         f"{url}/v1/images/generations",
         data=data,
         headers={"Content-Type": "application/json"},
@@ -256,7 +276,7 @@ def cmd_gen(a) -> None:
 def cmd_raw(a) -> None:
     """POST arbitrary JSON to an arbitrary path:  cluster.py raw /props '{}'"""
     url = resolve_url(a.url)
-    req = urllib.request.Request(
+    req = authed_request(
         url + a.path,
         data=(a.body or "{}").encode(),
         headers={"Content-Type": "application/json"},

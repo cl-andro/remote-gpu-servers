@@ -64,6 +64,15 @@ DEFAULTS_SDXL = {
 }
 
 
+COMMON_DEFAULTS = {
+    "__CLOUDFLARE_TUNNEL_TOKEN__": "",
+    "__STATIC_URL__": "",
+    "__AUTH_USER__": "",
+    "__AUTH_PASS__": "",
+    "__AUTH_KEY__": "",
+}
+
+
 def load_cfg(project_dir: str) -> dict:
     path = os.path.join(project_dir, "kernel_config.py")
     if not os.path.exists(path):
@@ -75,17 +84,31 @@ def load_cfg(project_dir: str) -> dict:
 
     model_type = cfg.get("__MODEL_TYPE__", "llm")
     if model_type == "flux":
-        defaults = DEFAULTS_FLUX
+        defaults = dict(DEFAULTS_FLUX)
         required = REQUIRED_FLUX
     elif model_type == "sdxl":
-        defaults = DEFAULTS_SDXL
+        defaults = dict(DEFAULTS_SDXL)
         required = REQUIRED_SDXL
     else:
-        defaults = DEFAULTS_LLM
+        defaults = dict(DEFAULTS_LLM)
         required = REQUIRED_LLM
+
+    defaults.update(COMMON_DEFAULTS)
 
     for key, val in defaults.items():
         cfg.setdefault(key, val)
+
+    env_map = {
+        "__CLOUDFLARE_TUNNEL_TOKEN__": os.environ.get("CLOUDFLARE_TUNNEL_TOKEN", ""),
+        "__STATIC_URL__": os.environ.get("CLUSTER_URL", ""),
+        "__AUTH_USER__": os.environ.get("CLUSTER_AUTH_USER", ""),
+        "__AUTH_PASS__": os.environ.get("CLUSTER_AUTH_PASS", ""),
+        "__AUTH_KEY__": os.environ.get("CLUSTER_API_KEY", ""),
+    }
+    for k, v in env_map.items():
+        if v:
+            cfg[k] = v
+
     # Allow overriding any config key via environment variable (e.g. __MODEL_FILE__=...)
     for key in set(required) | set(defaults):
         if key in os.environ:

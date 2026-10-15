@@ -47,6 +47,15 @@ URL_FILE="$PROJECT/url.txt"
 STOP_URL_FILE="$PROJECT/stop_url.txt"
 
 if [[ -f "$ENV_FILE" ]]; then
+  while IFS='=' read -r key val || [[ -n "$key" ]]; do
+    [[ "$key" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "$key" ]] && continue
+    key="$(echo "$key" | tr -d '[:space:]')"
+    val="$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
+    if [[ -n "$key" && -n "$val" ]]; then
+      export "$key"="$val"
+    fi
+  done < "$ENV_FILE"
   TOKEN="$(grep -m1 -oE 'KGAT_[A-Za-z0-9]+' "$ENV_FILE" || true)"
   [[ -n "$TOKEN" ]] && export KAGGLE_API_TOKEN="$TOKEN"
 fi
@@ -87,11 +96,11 @@ extract_url() {
   local target="$1" out marker
   out="$(kernel_log_text "$target")"
   marker="$(printf '%s\n' "$out" \
-    | grep -oE 'CONTROL_URL=https://[a-z0-9-]+\.trycloudflare\.com' \
+    | grep -oE 'CONTROL_URL=https://[a-zA-Z0-9.-]+' \
     | tail -1 | sed 's/^CONTROL_URL=//')"
   if [[ -n "$marker" ]]; then echo "$marker"; return 0; fi
   printf '%s\n' "$out" \
-    | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' \
+    | grep -oE 'https://[a-zA-Z0-9.-]+' \
     | tail -1
 }
 

@@ -159,10 +159,16 @@ if not os.path.exists(CF):
                    check=True)
     os.chmod(CF, 0o755)
 
+AUTH_USER = "__AUTH_USER__" or os.environ.get("CLUSTER_AUTH_USER", "")
+AUTH_PASS = "__AUTH_PASS__" or os.environ.get("CLUSTER_AUTH_PASS", "")
+AUTH_KEY = "__AUTH_KEY__" or os.environ.get("CLUSTER_API_KEY", "")
+AUTH_ENABLED = bool((AUTH_USER and AUTH_PASS) or AUTH_KEY)
+LLAMA_TARGET_PORT = PORT if not AUTH_ENABLED else (PORT + 2)
+
 # ---- llama-server (OpenAI-compatible) ----
 cmd = [LLAMA_SERVER, "-m", model_path, "--jinja", "-ngl", str(NGL),
        "-fa", "on", "-c", str(CTX), "-np", "1",
-       "--host", "127.0.0.1", "--port", str(PORT)]
+       "--host", "127.0.0.1", "--port", str(LLAMA_TARGET_PORT)]
 # -np 1 keeps the whole context for a single request (llama-server otherwise
 # divides -c across parallel slots, silently shrinking what one generation sees).
 if SPLIT_MODE:
@@ -187,7 +193,7 @@ for i in range(300):                      # up to 25 minutes
         print(open(LLM_LOG).read()[-4000:], flush=True)
         raise RuntimeError("llama-server died on startup")
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/health", timeout=4) as r:
+        with urllib.request.urlopen(f"http://127.0.0.1:{LLAMA_TARGET_PORT}/health", timeout=4) as r:
             if r.status == 200:
                 ready = True
                 break
@@ -201,7 +207,79 @@ if not ready:
     print(open(LLM_LOG).read()[-4000:], flush=True)
     raise RuntimeError("llama-server did not become healthy in time")
 
-print("llama-server is UP", flush=True)
+print("llama-server is UP on port", LLAMA_TARGET_PORT, flush=True)
+
+# ---- authenticating reverse proxy (if auth enabled) ----
+if AUTH_ENABLED:
+    import base64
+    class AuthProxy(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+
+        def _check_auth(self):
+            auth = self.headers.get("Authorization", "")
+            if auth.startswith("Basic "):
+                try:
+                    creds = base64.b64decode(auth[6:].strip()).decode("utf-8")
+                    u, p = creds.split(":", 1)
+                    if u == AUTH_USER and p == AUTH_PASS:
+                        return True
+                except Exception:
+                    pass
+            elif auth.startswith("Bearer "):
+                token = auth[7:].strip()
+                if (AUTH_KEY and token == AUTH_KEY) or (AUTH_PASS and token == AUTH_PASS):
+                    return True
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="AI Cluster Protected"')
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(b'{"error": "Unauthorized: valid username and password required"}\n')
+            return False
+
+        def do_OPTIONS(self):
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+            self.end_headers()
+
+        def do_HEAD(self):
+            if self._check_auth(): self._forward("HEAD")
+        def do_GET(self):
+            if self._check_auth(): self._forward("GET")
+        def do_POST(self):
+            if self._check_auth(): self._forward("POST")
+
+        def _forward(self, method):
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len > 0 else None
+            headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "authorization")}
+            req = urllib.request.Request(f"http://127.0.0.1:{LLAMA_TARGET_PORT}{self.path}",
+                                         data=body, headers=headers, method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=600) as r:
+                    self.send_response(r.status)
+                    for k, v in r.getheaders():
+                        if k.lower() not in ("transfer-encoding", "content-length"):
+                            self.send_header(k, v)
+                    self.end_headers()
+                    while True:
+                        chunk = r.read(4096)
+                        if not chunk: break
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+            except urllib.error.HTTPError as e:
+                self.send_response(e.code)
+                for k, v in e.headers.items():
+                    if k.lower() not in ("transfer-encoding", "content-length"):
+                        self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(e.read())
+
+    proxy = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), AuthProxy)
+    threading.Thread(target=proxy.serve_forever, daemon=True).start()
+    print("Auth Proxy listening on port", PORT, flush=True)
 
 # ---- local control server: lets your PC end the session on demand --------
 # Kaggle's public API has no session-stop permission, so this tiny server is
@@ -240,6 +318,27 @@ ctl = http.server.ThreadingHTTPServer(("127.0.0.1", CTL_PORT), CtlHandler)
 threading.Thread(target=ctl.serve_forever, daemon=True).start()
 
 # ---- publish both tunnels ----
+CF_TOKEN = "__CLOUDFLARE_TUNNEL_TOKEN__" or os.environ.get("CLOUDFLARE_TUNNEL_TOKEN", "")
+STATIC_URL = "__STATIC_URL__" or os.environ.get("CLUSTER_URL", "")
+
+def start_public_tunnel(url, log_path):
+    fh = open(log_path, "w")
+    if CF_TOKEN:
+        print("Starting named Cloudflare tunnel with token...", flush=True)
+        subprocess.Popen([CF, "tunnel", "--no-autoupdate", "run", "--token", CF_TOKEN, "--url", url],
+                         stdout=fh, stderr=subprocess.STDOUT)
+        time.sleep(3)
+        return STATIC_URL or "https://ai.883742.xyz"
+    else:
+        subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
+                         stdout=fh, stderr=subprocess.STDOUT)
+        for _ in range(60):
+            time.sleep(2)
+            m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open(log_path).read())
+            if m:
+                return m.group(0)
+        return None
+
 def start_tunnel(url, log_path):
     fh = open(log_path, "w")
     subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
@@ -251,7 +350,7 @@ def start_tunnel(url, log_path):
             return m.group(0)
     return None
 
-public_url = start_tunnel(f"http://127.0.0.1:{PORT}", CF_LOG)
+public_url = start_public_tunnel(f"http://127.0.0.1:{PORT}", CF_LOG)
 control_url = start_tunnel(f"http://127.0.0.1:{CTL_PORT}", CTL_LOG)
 
 if not public_url:
@@ -598,8 +697,37 @@ async function generate() {
 </html>
 """
 
+AUTH_USER = "__AUTH_USER__" or os.environ.get("CLUSTER_AUTH_USER", "")
+AUTH_PASS = "__AUTH_PASS__" or os.environ.get("CLUSTER_AUTH_PASS", "")
+AUTH_KEY = "__AUTH_KEY__" or os.environ.get("CLUSTER_API_KEY", "")
+AUTH_ENABLED = bool((AUTH_USER and AUTH_PASS) or AUTH_KEY)
+
 class ServerHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
+
+    def _check_auth(self):
+        if not AUTH_ENABLED:
+            return True
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Basic "):
+            try:
+                creds = base64.b64decode(auth[6:].strip()).decode("utf-8")
+                u, p = creds.split(":", 1)
+                if u == AUTH_USER and p == AUTH_PASS:
+                    return True
+            except Exception:
+                pass
+        elif auth.startswith("Bearer "):
+            token = auth[7:].strip()
+            if (AUTH_KEY and token == AUTH_KEY) or (AUTH_PASS and token == AUTH_PASS):
+                return True
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="AI Cluster Protected"')
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(b'{"error": "Unauthorized: valid username and password required"}\n')
+        return False
 
     def _send_json(self, code, payload):
         body = json.dumps(payload).encode()
@@ -618,9 +746,11 @@ class ServerHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_HEAD(self):
+        if not self._check_auth(): return
         self.do_GET()
 
     def do_GET(self):
+        if not self._check_auth(): return
         path = self.path.split("?")[0].rstrip("/")
         if path in ("", "/index.html"):
             body = HTML_PAGE.encode("utf-8")
@@ -648,6 +778,7 @@ class ServerHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(404, {"error": f"Path {path} not found"})
 
     def do_POST(self):
+        if not self._check_auth(): return
         path = self.path.split("?")[0].rstrip("/")
         content_len = int(self.headers.get("Content-Length", 0))
         post_data = self.rfile.read(content_len) if content_len > 0 else b"{}"
@@ -729,6 +860,27 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 print("Image server running on port", PORT, flush=True)
 
 # ---- publish both tunnels ----
+CF_TOKEN = "__CLOUDFLARE_TUNNEL_TOKEN__" or os.environ.get("CLOUDFLARE_TUNNEL_TOKEN", "")
+STATIC_URL = "__STATIC_URL__" or os.environ.get("CLUSTER_URL", "")
+
+def start_public_tunnel(url, log_path):
+    fh = open(log_path, "w")
+    if CF_TOKEN:
+        print("Starting named Cloudflare tunnel with token...", flush=True)
+        subprocess.Popen([CF, "tunnel", "--no-autoupdate", "run", "--token", CF_TOKEN, "--url", url],
+                         stdout=fh, stderr=subprocess.STDOUT)
+        time.sleep(3)
+        return STATIC_URL or "https://ai.883742.xyz"
+    else:
+        subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
+                         stdout=fh, stderr=subprocess.STDOUT)
+        for _ in range(60):
+            time.sleep(2)
+            m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open(log_path).read())
+            if m:
+                return m.group(0)
+        return None
+
 def start_tunnel(url, log_path):
     fh = open(log_path, "w")
     subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
@@ -740,7 +892,7 @@ def start_tunnel(url, log_path):
             return m.group(0)
     return None
 
-public_url = start_tunnel(f"http://127.0.0.1:{PORT}", CF_LOG)
+public_url = start_public_tunnel(f"http://127.0.0.1:{PORT}", CF_LOG)
 control_url = start_tunnel(f"http://127.0.0.1:{CTL_PORT}", CTL_LOG)
 
 if not public_url:
@@ -977,8 +1129,37 @@ async function generate() {
 </html>
 """
 
+AUTH_USER = "__AUTH_USER__" or os.environ.get("CLUSTER_AUTH_USER", "")
+AUTH_PASS = "__AUTH_PASS__" or os.environ.get("CLUSTER_AUTH_PASS", "")
+AUTH_KEY = "__AUTH_KEY__" or os.environ.get("CLUSTER_API_KEY", "")
+AUTH_ENABLED = bool((AUTH_USER and AUTH_PASS) or AUTH_KEY)
+
 class ServerHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
+
+    def _check_auth(self):
+        if not AUTH_ENABLED:
+            return True
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Basic "):
+            try:
+                creds = base64.b64decode(auth[6:].strip()).decode("utf-8")
+                u, p = creds.split(":", 1)
+                if u == AUTH_USER and p == AUTH_PASS:
+                    return True
+            except Exception:
+                pass
+        elif auth.startswith("Bearer "):
+            token = auth[7:].strip()
+            if (AUTH_KEY and token == AUTH_KEY) or (AUTH_PASS and token == AUTH_PASS):
+                return True
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="AI Cluster Protected"')
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(b'{"error": "Unauthorized: valid username and password required"}\n')
+        return False
 
     def _send_json(self, code, payload):
         body = json.dumps(payload).encode()
@@ -997,9 +1178,11 @@ class ServerHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_HEAD(self):
+        if not self._check_auth(): return
         self.do_GET()
 
     def do_GET(self):
+        if not self._check_auth(): return
         path = self.path.split("?")[0].rstrip("/")
         if path in ("", "/index.html"):
             body = HTML_PAGE.encode("utf-8")
@@ -1027,6 +1210,7 @@ class ServerHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(404, {"error": f"Path {path} not found"})
 
     def do_POST(self):
+        if not self._check_auth(): return
         path = self.path.split("?")[0].rstrip("/")
         content_len = int(self.headers.get("Content-Length", 0))
         post_data = self.rfile.read(content_len) if content_len > 0 else b"{}"
@@ -1107,6 +1291,27 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 print("Image server running on port", PORT, flush=True)
 
 # ---- publish both tunnels ----
+CF_TOKEN = "__CLOUDFLARE_TUNNEL_TOKEN__" or os.environ.get("CLOUDFLARE_TUNNEL_TOKEN", "")
+STATIC_URL = "__STATIC_URL__" or os.environ.get("CLUSTER_URL", "")
+
+def start_public_tunnel(url, log_path):
+    fh = open(log_path, "w")
+    if CF_TOKEN:
+        print("Starting named Cloudflare tunnel with token...", flush=True)
+        subprocess.Popen([CF, "tunnel", "--no-autoupdate", "run", "--token", CF_TOKEN, "--url", url],
+                         stdout=fh, stderr=subprocess.STDOUT)
+        time.sleep(3)
+        return STATIC_URL or "https://ai.883742.xyz"
+    else:
+        subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
+                         stdout=fh, stderr=subprocess.STDOUT)
+        for _ in range(60):
+            time.sleep(2)
+            m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open(log_path).read())
+            if m:
+                return m.group(0)
+        return None
+
 def start_tunnel(url, log_path):
     fh = open(log_path, "w")
     subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
@@ -1118,7 +1323,7 @@ def start_tunnel(url, log_path):
             return m.group(0)
     return None
 
-public_url = start_tunnel(f"http://127.0.0.1:{PORT}", CF_LOG)
+public_url = start_public_tunnel(f"http://127.0.0.1:{PORT}", CF_LOG)
 control_url = start_tunnel(f"http://127.0.0.1:{CTL_PORT}", CTL_LOG)
 
 if not public_url:

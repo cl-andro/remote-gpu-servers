@@ -93,13 +93,14 @@ CFG = k.CFG
 alias = CFG.get("__MODEL_ALIAS__", "model")
 name = CFG.get("__PROJECT_NAME__", alias)
 ctx = int(CFG.get("__CTX__", "32768"))
+api_key = os.environ.get("CLUSTER_API_KEY") or os.environ.get("CLUSTER_AUTH_PASS") or "not-needed"
 cfg = {
     "$schema": "https://opencode.ai/config.json",
     "provider": {
         "cluster": {
             "npm": "@ai-sdk/openai-compatible",
             "name": "Cluster (remote GPU)",
-            "options": {"baseURL": url.rstrip("/") + "/v1", "apiKey": "not-needed"},
+            "options": {"baseURL": url.rstrip("/") + "/v1", "apiKey": api_key},
             "models": {
                 alias: {
                     "name": f"{name} (Kaggle GPU)",
