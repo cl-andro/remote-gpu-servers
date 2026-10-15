@@ -767,3 +767,381 @@ print("Stop from PC   : ctr.sh stop   (uses the control tunnel above)")
 '''
 
 FLUX_CELLS = [CELL_1_ENV, CELL_2_FLUX_DEPS, CELL_3_FLUX_FETCH, CELL_4_FLUX_SERVE, CELL_5_KEEPALIVE]
+
+CELL_2_SDXL_DEPS = r'''
+# --- Cell 2: install dependencies for SDXL Turbo inference ----------------
+import subprocess, sys
+
+pkgs = [
+    "diffusers>=0.30.0",
+    "transformers>=4.44.0",
+    "accelerate>=0.33.0",
+    "invisible-watermark>=0.2.0",
+    "safetensors",
+]
+print("installing:", " ".join(pkgs), flush=True)
+subprocess.run([sys.executable, "-m", "pip", "install", "-q"] + pkgs, check=True)
+print("packages installed.", flush=True)
+'''
+
+CELL_3_SDXL_SERVE = r'''
+# --- Cell 3: load SDXL-Turbo pipeline + start server + open tunnels -------
+import os, re, subprocess, time, urllib.request, json, threading, http.server
+import base64, io, gc
+import torch
+from diffusers import AutoPipelineForText2Image
+
+PORT = int("__PORT__")
+CTL_PORT = int("__CTL_PORT__")
+DEFAULT_STEPS = int("__DEFAULT_STEPS__" or "1")
+DEFAULT_WIDTH = int("__DEFAULT_WIDTH__" or "512")
+DEFAULT_HEIGHT = int("__DEFAULT_HEIGHT__" or "512")
+MODEL_REPO = "__MODEL_REPO__"
+
+STOP_REQUESTED = threading.Event()
+GEN_LOCK = threading.Lock()
+
+WORK = "/kaggle/temp/run"
+os.makedirs(WORK, exist_ok=True)
+CF_LOG = os.path.join(WORK, "cloudflared.log")
+CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
+
+# ---- cloudflared binary ----
+CF = "/kaggle/temp/cloudflared"
+if not os.path.exists(CF):
+    subprocess.run(["curl", "-sL", "-o", CF,
+                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
+                   check=True)
+    os.chmod(CF, 0o755)
+
+# ---- load pipeline ----
+print(f"Loading SDXL-Turbo from {MODEL_REPO} (fp16)...", flush=True)
+pipe = AutoPipelineForText2Image.from_pretrained(
+    MODEL_REPO,
+    torch_dtype=torch.float16,
+    variant="fp16",
+)
+pipe.to("cuda")
+print("SDXL-Turbo pipeline loaded and ready on GPU!", flush=True)
+
+# ---- Control Server on CTL_PORT (port 8081) ----
+STOP_TOKEN = os.environ.get("CLUSTER_STOP_TOKEN") or os.urandom(8).hex()
+
+class CtlHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def _send(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path.rstrip("/") in ("", "/health"):
+            self._send(200, {"ok": True, "status": "up",
+                             "stopping": STOP_REQUESTED.is_set(),
+                             "model": "__MODEL_FILE__"})
+        elif self.path.startswith("/stop/" + STOP_TOKEN):
+            STOP_REQUESTED.set()
+            self._send(200, {"ok": True, "message": "shutdown requested"})
+            print("STOP_REQUESTED received via control tunnel", flush=True)
+        else:
+            self._send(404, {"ok": False, "error": "not found"})
+
+    def do_POST(self):
+        self.do_GET()
+
+ctl = http.server.ThreadingHTTPServer(("127.0.0.1", CTL_PORT), CtlHandler)
+threading.Thread(target=ctl.serve_forever, daemon=True).start()
+
+# ---- Image Generation Server on PORT (port 8080) ----
+HTML_PAGE = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SDXL-Turbo Server</title>
+<style>
+  :root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b0c10; color: #c5c6c7; }
+  body { max-width: 900px; margin: 40px auto; padding: 0 20px; }
+  .card { background: #1f2833; border: 1px solid #45a29e; border-radius: 12px; padding: 28px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+  h1 { margin-top: 0; color: #66fcf1; font-size: 1.8rem; display: flex; align-items: center; gap: 10px; }
+  .badge { background: #45a29e; color: #0b0c10; font-size: 0.75rem; padding: 4px 10px; border-radius: 999px; font-weight: 700; text-transform: uppercase; }
+  p.subtitle { color: #c5c6c7; font-size: 0.95rem; margin-top: -6px; margin-bottom: 24px; }
+  label { display: block; font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #66fcf1; margin-bottom: 6px; }
+  textarea { width: 100%; box-sizing: border-box; background: #0b0c10; border: 1px solid #45a29e; border-radius: 8px; color: #fff; padding: 12px; font-size: 1rem; resize: vertical; min-height: 90px; }
+  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-top: 16px; }
+  select, input { width: 100%; box-sizing: border-box; background: #0b0c10; border: 1px solid #45a29e; border-radius: 8px; color: #fff; padding: 10px; font-size: 0.95rem; }
+  button { width: 100%; margin-top: 24px; padding: 14px; background: #66fcf1; color: #0b0c10; border: none; border-radius: 8px; font-size: 1.1rem; font-weight: 700; cursor: pointer; transition: all 0.2s; }
+  button:hover:not(:disabled) { background: #45a29e; color: #fff; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #status { margin-top: 16px; font-size: 0.95rem; text-align: center; color: #66fcf1; min-height: 24px; }
+  #preview { margin-top: 24px; text-align: center; }
+  #preview img { max-width: 100%; border-radius: 8px; border: 1px solid #45a29e; box-shadow: 0 4px 16px rgba(0,0,0,0.6); }
+  .download-btn { margin-top: 12px; display: inline-block; background: #66fcf1; color: #0b0c10; text-decoration: none; padding: 8px 16px; border-radius: 6px; font-size: 0.9rem; font-weight: 700; }
+  .api-info { background: #0b0c10; border: 1px solid #45a29e; border-radius: 8px; padding: 16px; margin-top: 24px; font-size: 0.85rem; }
+  code { color: #66fcf1; font-family: ui-monospace, SFMono-Regular, monospace; }
+  pre { background: #1f2833; padding: 10px; border-radius: 6px; overflow-x: auto; margin-top: 8px; color: #e5e7eb; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>SDXL-Turbo <span class="badge">ONLINE</span></h1>
+  <p class="subtitle">Real-time 1-step text-to-image synthesis running on Kaggle GPU</p>
+  
+  <label for="prompt">Prompt</label>
+  <textarea id="prompt" placeholder="e.g. A cinematic shot of an astronaut riding a white horse on Mars, photorealistic, 8k resolution"></textarea>
+  
+  <div class="row">
+    <div>
+      <label for="size">Resolution</label>
+      <select id="size">
+        <option value="512x512" selected>512 × 512 (Instant ~1.5s)</option>
+        <option value="768x768">768 × 768</option>
+        <option value="1024x1024">1024 × 1024</option>
+      </select>
+    </div>
+    <div>
+      <label for="steps">Inference Steps</label>
+      <select id="steps">
+        <option value="1" selected>1 (Real-time)</option>
+        <option value="2">2</option>
+        <option value="4">4</option>
+      </select>
+    </div>
+    <div>
+      <label for="seed">Seed (optional)</label>
+      <input id="seed" type="number" placeholder="Random">
+    </div>
+  </div>
+  
+  <button id="genBtn" onclick="generate()">Generate Image</button>
+  <div id="status"></div>
+  <div id="preview"></div>
+
+  <div class="api-info">
+    <strong>OpenAI-compatible Image Generation Endpoint:</strong>
+    <pre>POST /v1/images/generations
+Content-Type: application/json
+
+{"prompt": "An astronaut on Mars", "size": "512x512", "response_format": "b64_json"}</pre>
+  </div>
+</div>
+
+<script>
+async function generate() {
+  const prompt = document.getElementById('prompt').value.trim();
+  if (!prompt) return alert('Please enter a prompt');
+  const size = document.getElementById('size').value;
+  const steps = parseInt(document.getElementById('steps').value);
+  const seedVal = document.getElementById('seed').value;
+  const btn = document.getElementById('genBtn');
+  const status = document.getElementById('status');
+  const preview = document.getElementById('preview');
+  
+  btn.disabled = true;
+  preview.innerHTML = '';
+  const startTime = Date.now();
+  status.textContent = 'Generating on GPU... (~1-3s)';
+  
+  try {
+    const payload = { prompt, size, steps, response_format: 'b64_json' };
+    if (seedVal) payload.seed = parseInt(seedVal);
+    const resp = await fetch('/v1/images/generations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!resp.ok) {
+      const err = await resp.text();
+      throw new Error(`Server returned HTTP ${resp.status}: ${err}`);
+    }
+    const data = await resp.json();
+    const b64 = data.data[0].b64_json;
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    status.textContent = `Completed in ${elapsed}s!`;
+    const imgSrc = 'data:image/png;base64,' + b64;
+    preview.innerHTML = `
+      <img src="${imgSrc}" alt="Generated Image"><br>
+      <a class="download-btn" href="${imgSrc}" download="sdxl-${Date.now()}.png">Download Full Resolution</a>
+    `;
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+</script>
+</body>
+</html>
+"""
+
+class ServerHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+
+    def _send_json(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.end_headers()
+
+    def do_HEAD(self):
+        self.do_GET()
+
+    def do_GET(self):
+        path = self.path.split("?")[0].rstrip("/")
+        if path in ("", "/index.html"):
+            body = HTML_PAGE.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path in ("/health", "/v1/health"):
+            self._send_json(200, {
+                "status": "ok",
+                "model": "__MODEL_ALIAS__",
+                "architecture": "sdxl-turbo",
+                "device": "cuda" if torch.cuda.is_available() else "cpu"
+            })
+        elif path in ("/models", "/v1/models"):
+            self._send_json(200, {
+                "data": [{
+                    "id": "__MODEL_ALIAS__",
+                    "object": "model",
+                    "type": "image-generation"
+                }]
+            })
+        else:
+            self._send_json(404, {"error": f"Path {path} not found"})
+
+    def do_POST(self):
+        path = self.path.split("?")[0].rstrip("/")
+        content_len = int(self.headers.get("Content-Length", 0))
+        post_data = self.rfile.read(content_len) if content_len > 0 else b"{}"
+        try:
+            req = json.loads(post_data.decode("utf-8"))
+        except Exception:
+            return self._send_json(400, {"error": "Invalid JSON payload"})
+
+        if path in ("/v1/images/generations", "/generate"):
+            prompt = req.get("prompt", "")
+            if not prompt:
+                return self._send_json(400, {"error": "Missing prompt"})
+
+            size = req.get("size", "512x512")
+            try:
+                width, height = map(int, size.lower().split("x"))
+            except Exception:
+                width, height = DEFAULT_WIDTH, DEFAULT_HEIGHT
+
+            steps = int(req.get("steps") or DEFAULT_STEPS)
+            steps = max(1, min(10, steps))
+            seed = req.get("seed")
+
+            gen = None
+            if seed is not None:
+                try:
+                    gen = torch.Generator("cuda").manual_seed(int(seed))
+                except Exception:
+                    pass
+
+            t0 = time.time()
+            print(f"[GEN] Prompt: '{prompt[:80]}...' size={width}x{height} steps={steps}", flush=True)
+
+            with GEN_LOCK:
+                with torch.inference_mode():
+                    img = pipe(
+                        prompt=prompt,
+                        height=height,
+                        width=width,
+                        num_inference_steps=steps,
+                        guidance_scale=0.0,
+                        generator=gen,
+                    ).images[0]
+                torch.cuda.empty_cache()
+                gc.collect()
+
+            elapsed = round(time.time() - t0, 2)
+            print(f"[GEN] Done in {elapsed}s", flush=True)
+
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            b64_bytes = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+            if path == "/generate":
+                return self._send_json(200, {
+                    "image_b64": b64_bytes,
+                    "prompt": prompt,
+                    "width": width,
+                    "height": height,
+                    "steps": steps,
+                    "elapsed_seconds": elapsed
+                })
+            else:
+                return self._send_json(200, {
+                    "created": int(time.time()),
+                    "data": [
+                        {
+                            "b64_json": b64_bytes,
+                            "revised_prompt": prompt
+                        }
+                    ]
+                })
+        else:
+            self._send_json(404, {"error": f"POST {path} not supported"})
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), ServerHandler)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+print("Image server running on port", PORT, flush=True)
+
+# ---- publish both tunnels ----
+def start_tunnel(url, log_path):
+    fh = open(log_path, "w")
+    subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
+                     stdout=fh, stderr=subprocess.STDOUT)
+    for _ in range(60):
+        time.sleep(2)
+        m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open(log_path).read())
+        if m:
+            return m.group(0)
+    return None
+
+public_url = start_tunnel(f"http://127.0.0.1:{PORT}", CF_LOG)
+control_url = start_tunnel(f"http://127.0.0.1:{CTL_PORT}", CTL_LOG)
+
+if not public_url:
+    print("cloudflared log:", open(CF_LOG).read()[-2000:], flush=True)
+    raise RuntimeError("could not obtain a public tunnel URL")
+if not control_url:
+    print("control cloudflared log:", open(CTL_LOG).read()[-2000:], flush=True)
+    raise RuntimeError("could not obtain a control tunnel URL")
+
+with open("/kaggle/working/CONTROL_URL.txt", "w") as f:
+    f.write(public_url + "\n")
+with open("/kaggle/working/STOP_URL.txt", "w") as f:
+    f.write(control_url + "/stop/" + STOP_TOKEN + "\n")
+
+print("=" * 72)
+print("CONTROL_URL=" + public_url)
+print("STOP_URL=" + control_url + "/stop/" + STOP_TOKEN)
+print("MODEL=" + "__MODEL_FILE__")
+print("=" * 72)
+print(f"Web UI         : {public_url}")
+print(f"API endpoint   : {public_url}/v1/images/generations")
+print(f"Health         : {public_url}/health")
+print("Stop from PC   : ctr.sh stop   (uses the control tunnel above)")
+'''
+
+SDXL_CELLS = [CELL_1_ENV, CELL_2_SDXL_DEPS, CELL_3_SDXL_SERVE, CELL_5_KEEPALIVE]

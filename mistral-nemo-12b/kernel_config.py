@@ -1,0 +1,24 @@
+"""Project config for Mistral-Nemo-Instruct-2407 server.
+The shared generator (../lib/make_kernel.py) reads `CFG` and writes
+`notebook.ipynb`. Edit values here, then run:  ./ctr.sh push
+"""
+
+CFG = {
+    "__PROJECT_NAME__": "Mistral-Nemo-Instruct-2407",
+    "__MODEL_REPO__": "unsloth/Mistral-Nemo-Instruct-2407-GGUF",
+    "__MODEL_FILE__": "Mistral-Nemo-Instruct-2407.Q4_K_M.gguf",
+    "__MODEL_SIZE_GB__": "6.96",
+    "__MODEL_ALIAS__": "mistral-nemo-12b",
+    "__LLAMA_BUILD__": "b11636",
+    "__CTX__": "65536",
+    "__NGL__": "99",
+    "__SPLIT_MODE__": "layer",
+    "__EXTRA_ARGS__": "",
+    "__PORT__": "8080",
+    "__CTL_PORT__": "8081",
+    "__SERVE_MINUTES__": "660",
+    "__MMPROJ_FILE__": "",
+    "__MMPROJ_SIZE_GB__": "",
+    "__DRAFT_FILE__": "",
+    "__DRAFT_SIZE_GB__": "",
+}

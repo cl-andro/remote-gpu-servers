@@ -25,14 +25,41 @@ writing one config file and running one command.
 All of these target **Kaggle T4 x2** (32 GB VRAM total, ~29 GB RAM, 12 h
 sessions, ~30 GPU-h/week). Sizes are the quantized GGUF weights.
 
+### 🎨 Image Generation
+| Project | Model | Type | Size | Steps / Ctx | Best for |
+| --- | --- | --- | --- | --- | --- |
+| [`flux1-schnell/`](flux1-schnell/) | FLUX.1-schnell | 12B MMDiT (GGUF Q4_K_S) | 6.3 GB | 4 steps | SOTA photorealistic diffusion transformer |
+| [`sdxl-turbo/`](sdxl-turbo/) | SDXL-Turbo | 3.5B ADD (FP16) | 6.0 GB | 1 step | Instant real-time text-to-image (~1.5s/img) |
+
+### 💻 Coding Specialists
 | Project | Model | Type | Size | Context | Best for |
 | --- | --- | --- | --- | --- | --- |
-| [`qwen3-coder-30b/`](qwen3-coder-30b/) | Qwen3-Coder-30B-A3B | MoE 30B / 3.3B active | 17.7 GB | 65k | 🏆 agentic coding — fastest |
-| [`gpt-oss-20b/`](gpt-oss-20b/) | gpt-oss-20b | MoE 21B / 3.6B active | 12.1 GB | 65k | light, single-GPU footprint |
-| [`devstral-small-2/`](devstral-small-2/) | Devstral-Small-2-24B | dense 24B | 14.5 GB | 65k | coding agent, simple runtime |
-| [`muse-glimmer-30b/`](muse-glimmer-30b/) | Muse-Glimmer-30B | dense 30B + vision + drafter | 19.8 GB | 65k | agentic + image input |
-| [`saluki/`](saluki/) | Underdog-Saluki-27B-1.0 | dense 27B (IQ2-mix) | 7.9 GB | 32k | reasoning, proven baseline |
-| [`flux1-schnell/`](flux1-schnell/) | FLUX.1-schnell | 12B MMDiT (GGUF) | 6.3 GB | 4 steps | 🎨 text-to-image generation |
+| [`qwen3-coder-30b/`](qwen3-coder-30b/) | Qwen3-Coder-30B-A3B | MoE 30B / 3.3B active | 17.7 GB | 65k | 🏆 Flagship agentic coding — highest throughput |
+| [`qwen2.5-coder-32b/`](qwen2.5-coder-32b/) | Qwen2.5-Coder-32B | Dense 32B (Q4_K_M) | 18.5 GB | 32k | 🧠 Heavyweight coding leader (beats GPT-4o on HumanEval) |
+| [`qwen2.5-coder-14b/`](qwen2.5-coder-14b/) | Qwen2.5-Coder-14B | Dense 14B (Q4_K_M) | 8.4 GB | 65k | 🚀 Fast refactoring, test gen & API development |
+| [`devstral-small-2/`](devstral-small-2/) | Devstral-Small-2-24B | Dense 24B (Q4_K_M) | 14.5 GB | 65k | Coding agent, straightforward dense runtime |
+
+### 🔬 Reasoning & Mathematics
+| Project | Model | Type | Size | Context | Best for |
+| --- | --- | --- | --- | --- | --- |
+| [`deepseek-r1-14b/`](deepseek-r1-14b/) | DeepSeek-R1-Distill-14B | Dense 14B (Q4_K_M) | 8.4 GB | 32k | Advanced math & algorithmic reasoning (`think` CoT) |
+| [`deepseek-r1-8b/`](deepseek-r1-8b/) | DeepSeek-R1-Distill-8B | Dense 8B (Q4_K_M) | 4.6 GB | 32k | Ultra-fast low-latency chain-of-thought logic |
+| [`phi-4-14b/`](phi-4-14b/) | Phi-4 (Microsoft) | Dense 14B (Q4_K_M) | 8.3 GB | 16k | Academic STEM, physics, calculus & analytical Q&A |
+| [`saluki/`](saluki/) | Underdog-Saluki-27B-1.0 | Dense 27B (IQ2-mix) | 7.9 GB | 32k | Proven reasoning baseline with deep domain memory |
+
+### 📄 OCR, Vision & Document AI
+| Project | Model | Type | Size | Context | Best for |
+| --- | --- | --- | --- | --- | --- |
+| [`qwen2.5-vl-7b/`](qwen2.5-vl-7b/) | Qwen2.5-VL-7B-Instruct | 7B + mmproj F16 | 5.6 GB | 32k | Scanned documents, OCR, charts & screen grounding |
+| [`minicpm-v-2_6/`](minicpm-v-2_6/) | MiniCPM-V-2.6 | 8B + mmproj F16 | 5.3 GB | 32k | High-res table extraction & multi-image comparison |
+| [`muse-glimmer-30b/`](muse-glimmer-30b/) | Muse-Glimmer-30B | Dense 30B + vision + draft | 19.8 GB | 65k | Dense multimodal reasoning + speculative decoding |
+
+### 🛠️ Agentic Tool-Use & Long Context
+| Project | Model | Type | Size | Context | Best for |
+| --- | --- | --- | --- | --- | --- |
+| [`hermes-3-8b/`](hermes-3-8b/) | Hermes-3-Llama-3.1-8B | Dense 8B (Q4_K_M) | 4.6 GB | 32k | Autonomous agents, structured JSON & tool calling |
+| [`gpt-oss-20b/`](gpt-oss-20b/) | gpt-oss-20b | MoE 21B / 3.6B active | 12.1 GB | 65k | Lightweight MoE agentic loop, low memory footprint |
+| [`mistral-nemo-12b/`](mistral-nemo-12b/) | Mistral-Nemo-Instruct | Dense 12.2B (Q4_K_M) | 7.0 GB | 65k | 128k long-doc synthesis & Tekken multilingual tokenizer |
 
 > Adding another model is a folder with a `kernel_config.py`, a
 > `kernel-metadata.json`, and a `ctr.sh` wrapper — copy any project folder and

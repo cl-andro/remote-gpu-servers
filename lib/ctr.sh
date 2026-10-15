@@ -206,7 +206,7 @@ PY
     [[ -z "$URL" ]] && { echo "no URL; run ./ctr.sh url first" >&2; exit 1; }
     echo "== health =="
     python3 "$CLIENT" --url "$URL" --model "$MODEL_ALIAS" health
-    if [[ "$MODEL_TYPE" == "flux" ]]; then
+    if [[ "$MODEL_TYPE" == "flux" || "$MODEL_TYPE" == "sdxl" ]]; then
       echo "== test image generation (512x512) =="
       python3 "$CLIENT" --url "$URL" --model "$MODEL_ALIAS" gen \
         "a golden metallic robot in a futuristic desert, sharp focus, 8k" \

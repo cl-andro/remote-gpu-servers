@@ -23,7 +23,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from cells import CELLS, FLUX_CELLS  # noqa: E402
+from cells import CELLS, FLUX_CELLS, SDXL_CELLS  # noqa: E402
 
 # Placeholders whose value is not allowed to be empty.
 REQUIRED_LLM = (
@@ -50,6 +50,19 @@ DEFAULTS_FLUX = {
     "__DEFAULT_HEIGHT__": "1024",
 }
 
+REQUIRED_SDXL = (
+    "__PROJECT_NAME__", "__MODEL_REPO__", "__PORT__", "__CTL_PORT__",
+    "__SERVE_MINUTES__", "__MODEL_ALIAS__",
+)
+
+DEFAULTS_SDXL = {
+    "__DEFAULT_STEPS__": "1",
+    "__DEFAULT_WIDTH__": "512",
+    "__DEFAULT_HEIGHT__": "512",
+    "__MODEL_FILE__": "sdxl-turbo",
+    "__MODEL_SIZE_GB__": "6.0",
+}
+
 
 def load_cfg(project_dir: str) -> dict:
     path = os.path.join(project_dir, "kernel_config.py")
@@ -60,9 +73,16 @@ def load_cfg(project_dir: str) -> dict:
     spec.loader.exec_module(mod)
     cfg = dict(getattr(mod, "CFG", {}))
 
-    is_flux = cfg.get("__MODEL_TYPE__") == "flux"
-    defaults = DEFAULTS_FLUX if is_flux else DEFAULTS_LLM
-    required = REQUIRED_FLUX if is_flux else REQUIRED_LLM
+    model_type = cfg.get("__MODEL_TYPE__", "llm")
+    if model_type == "flux":
+        defaults = DEFAULTS_FLUX
+        required = REQUIRED_FLUX
+    elif model_type == "sdxl":
+        defaults = DEFAULTS_SDXL
+        required = REQUIRED_SDXL
+    else:
+        defaults = DEFAULTS_LLM
+        required = REQUIRED_LLM
 
     for key, val in defaults.items():
         cfg.setdefault(key, val)
@@ -88,7 +108,13 @@ def main() -> None:
     project_dir = os.path.abspath(sys.argv[1])
     cfg = load_cfg(project_dir)
 
-    template_cells = FLUX_CELLS if cfg.get("__MODEL_TYPE__") == "flux" else CELLS
+    model_type = cfg.get("__MODEL_TYPE__", "llm")
+    if model_type == "flux":
+        template_cells = FLUX_CELLS
+    elif model_type == "sdxl":
+        template_cells = SDXL_CELLS
+    else:
+        template_cells = CELLS
     cells = [render(c, cfg) for c in template_cells]
 
     # Fail fast if any placeholder is left unsubstituted.
