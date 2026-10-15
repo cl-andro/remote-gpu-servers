@@ -18,6 +18,23 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CTR="$ROOT/lib/ctr.sh"
 CLIENT="$ROOT/lib/cluster.py"
+ENV_FILE="$ROOT/.env"
+
+if [[ -f "$ENV_FILE" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    if [[ "$line" == *=* ]]; then
+      key="${line%%=*}"
+      val="${line#*=}"
+      key="$(echo "$key" | tr -d '[:space:]')"
+      val="$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
+      if [[ -n "$key" ]]; then
+        export "$key"="$val"
+      fi
+    fi
+  done < "$ENV_FILE"
+fi
 
 die() { echo "cluster: $*" >&2; exit 1; }
 
@@ -87,13 +104,27 @@ mkdir -p "$(dirname "$CFG")"
 python3 - "$PROJECT" "$URL" "$CFG" <<'PY'
 import json, os, sys
 project, url, out = sys.argv[1], sys.argv[2], sys.argv[3]
+
+root_env = os.path.abspath(os.path.join(project, "..", ".env"))
+if os.path.exists(root_env):
+    with open(root_env) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip("'\"")
+            if k not in os.environ and v:
+                os.environ[k] = v
+
 sys.path.insert(0, project)
 import kernel_config as k
 CFG = k.CFG
 alias = CFG.get("__MODEL_ALIAS__", "model")
 name = CFG.get("__PROJECT_NAME__", alias)
 ctx = int(CFG.get("__CTX__", "32768"))
-api_key = os.environ.get("CLUSTER_API_KEY") or os.environ.get("CLUSTER_AUTH_PASS") or "not-needed"
+api_key = os.environ.get("CLUSTER_API_KEY") or os.environ.get("CLUSTER_AUTH_PASS") or ""
 cfg = {
     "$schema": "https://opencode.ai/config.json",
     "provider": {

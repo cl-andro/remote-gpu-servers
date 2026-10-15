@@ -77,7 +77,7 @@ def resolve_url(explicit: str | None) -> str:
 
 
 def auth_headers() -> dict[str, str]:
-    headers = {}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) cluster/1.0"}
     user = os.environ.get("CLUSTER_AUTH_USER")
     passwd = os.environ.get("CLUSTER_AUTH_PASS")
     api_key = os.environ.get("CLUSTER_API_KEY")
