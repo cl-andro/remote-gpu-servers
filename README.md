@@ -1,4 +1,13 @@
-# Server AI Config
+# Remote GPU Servers
+
+© 2026 CL-Andro / Mohammad Zaid — All Rights Reserved.
+
+All source code, training datasets, documentation, and associated materials in
+this repository are the exclusive intellectual property of CL-Andro / Mohammad
+Zaid. Unauthorized copying, modification, redistribution, or commercial use — in
+whole or in part — without prior written consent is strictly prohibited.
+
+---
 
 Runnable, self-contained configs that stand up **LLM inference servers on
 remote GPUs** (Kaggle, etc.) and let you **drive them from your own PC** — with
@@ -41,7 +50,8 @@ PC so the GPU is released.
 ## Quick start (this repo)
 
 ```bash
-git clone <this-repo> && cd server-ai-config
+git clone git@github-third:zk-mohammad/remote-gpu-servers.git
+cd remote-gpu-servers
 
 cp .env.example .env      # then paste your Kaggle token into .env
 cd saluki
@@ -66,13 +76,3 @@ performance, and gotchas.
 - Tunnel URLs are **public** while the session runs — treat them as shared
   secrets and stop the session when you are done.
 - The stop/control channel uses a random per-run secret path.
-
-## License
-
-Proprietary. See the notice below.
-
----
-
-© 2026 CL-Andro / Mohammad Zaid — All Rights Reserved.
-
-    All source code, training datasets, documentation, and associated materials in this repository are the exclusive intellectual property of CL-Andro / Mohammad Zaid. Unauthorized copying, modification, redistribution, or commercial use — in whole or in part — without prior written consent is strictly prohibited.

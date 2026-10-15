@@ -1,6 +1,15 @@
 # Underdog-Saluki-27B — remote control from your PC
 
-[← back to Server AI Config](../README.md) · part of the **Server AI Config**
+© 2026 CL-Andro / Mohammad Zaid — All Rights Reserved.
+
+All source code, training datasets, documentation, and associated materials in
+this repository are the exclusive intellectual property of CL-Andro / Mohammad
+Zaid. Unauthorized copying, modification, redistribution, or commercial use — in
+whole or in part — without prior written consent is strictly prohibited.
+
+---
+
+[← back to Remote GPU Servers](../README.md) · part of the **Remote GPU Servers**
 collection of remote-GPU inference setups.
 
 The model runs **on Kaggle** (GPU T4 x2). Your PC only sends HTTP requests to a
@@ -157,9 +166,3 @@ GPU type lives in `saluki/kernel-metadata.json` (`machine_shape`).
 - **Quota:** a running GPU session consumes your weekly Kaggle GPU hours.
 - **`url.txt` / `stop_url.txt` are per-run.** They are git-ignored and are
   rewritten every push — a fresh run issues fresh tunnel URLs.
-
----
-
-© 2026 CL-Andro / Mohammad Zaid — All Rights Reserved.
-
-    All source code, training datasets, documentation, and associated materials in this repository are the exclusive intellectual property of CL-Andro / Mohammad Zaid. Unauthorized copying, modification, redistribution, or commercial use — in whole or in part — without prior written consent is strictly prohibited.
