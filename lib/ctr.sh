@@ -151,8 +151,8 @@ case "$CMD" in
       fi
     done
     if [[ -z "$URL" ]]; then
-      echo "no tunnel URL yet. Check status with: ./ctr.sh status" >&2
-      echo "or watch startup with:             ./ctr.sh follow" >&2
+      echo "no tunnel URL yet. Check status with: ./bin/cluster $(basename "$PROJECT") status" >&2
+      echo "or watch startup with:             ./bin/cluster $(basename "$PROJECT") follow" >&2
       exit 1
     fi
     echo "$URL" | tee "$URL_FILE"
@@ -173,7 +173,7 @@ case "$CMD" in
       [[ -n "$STOP_URL" ]] && echo "$STOP_URL" > "$STOP_URL_FILE"
     fi
     if [[ -z "$STOP_URL" ]]; then
-      echo "could not find STOP_URL. Is the run live? Try: ./ctr.sh stop-url" >&2
+      echo "could not find STOP_URL. Is the run live? Try: ./bin/cluster $(basename "$PROJECT") stop-url" >&2
       echo "Fallback: https://www.kaggle.com/code/$KERNEL -> Stop Session" >&2
       exit 1
     fi
@@ -201,7 +201,7 @@ PY
       sleep "${STOP_POLL_SECONDS:-15}"
     done
     echo "Still showing: $STATE" >&2
-    echo "It usually finishes shortly; re-check with: ./ctr.sh status" >&2
+    echo "It usually finishes shortly; re-check with: ./bin/cluster $(basename "$PROJECT") status" >&2
     ;;
   stop-url)
     STOP_URL="$(extract_stop_url "$KERNEL" || true)"
@@ -216,7 +216,7 @@ PY
     ;;
   test)
     URL="$(cat "$URL_FILE" 2>/dev/null || extract_url "$KERNEL" || true)"
-    [[ -z "$URL" ]] && { echo "no URL; run ./ctr.sh url first" >&2; exit 1; }
+    [[ -z "$URL" ]] && { echo "no URL; run ./bin/cluster $(basename "$PROJECT") url first" >&2; exit 1; }
     echo "== health =="
     python3 "$CLIENT" --url "$URL" --model "$MODEL_ALIAS" health
     if [[ "$MODEL_TYPE" == "flux" || "$MODEL_TYPE" == "sdxl" ]]; then
@@ -235,7 +235,7 @@ PY
     # Direct passthrough to the stdlib client (one-shot chat, REPL, image gen, etc.).
     # `$@` already begins with the command name.
     URL="$(cat "$URL_FILE" 2>/dev/null || extract_url "$KERNEL" || true)"
-    [[ -z "$URL" ]] && { echo "no URL; run ./ctr.sh url first" >&2; exit 1; }
+    [[ -z "$URL" ]] && { echo "no URL; run ./bin/cluster $(basename "$PROJECT") url first" >&2; exit 1; }
     exec python3 "$CLIENT" --url "$URL" --model "$MODEL_ALIAS" "$@"
     ;;
   *)
