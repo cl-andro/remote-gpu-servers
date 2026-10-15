@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# bin/cluster — branded launcher for the remote-GPU models in this repo.
+#
+# One command surface for every project. It wires a project's public tunnel
+# into the opencode agent (a full TUI: editable input, sessions, file writes,
+# tool use) instead of the plain streaming CLI.
+#
+#   ./bin/cluster list                 show projects and their live status
+#   ./bin/cluster <project> up         push the kernel and wait for the URL
+#   ./bin/cluster <project> agent      launch opencode against the tunnel
+#   ./bin/cluster <project> chat "..." quick one-shot chat (no TUI)
+#   ./bin/cluster <project> status|logs|follow|stop|stop-url|test|url
+#
+# opencode is NOT vendored here: the agent step uses your installed `opencode`
+# and simply points it at the tunnel, so it tracks upstream automatically.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CTR="$ROOT/lib/ctr.sh"
+CLIENT="$ROOT/lib/cluster.py"
+
+die() { echo "cluster: $*" >&2; exit 1; }
+
+projects() {
+  for d in "$ROOT"/*/; do
+    [[ -f "$d/kernel-metadata.json" ]] && basename "$d"
+  done
+}
+
+usage() {
+  sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  echo
+  echo "projects: $(projects | tr '\n' ' ')"
+}
+
+resolve_project() {
+  local name="$1"
+  [[ -n "$name" ]] || die "no project given (see: ./bin/cluster list)"
+  [[ -f "$ROOT/$name/kernel-metadata.json" ]] || die "unknown project '$name'"
+  echo "$ROOT/$name"
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  ""|help|-h|--help)
+    usage; exit 0 ;;
+  list)
+    for p in $(projects); do
+      st="$(kaggle kernels status "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["id"])' "$ROOT/$p/kernel-metadata.json")" 2>/dev/null | tail -1 || true)"
+      printf '%-24s %s\n' "$p" "${st:-unknown}"
+    done
+    exit 0 ;;
+esac
+
+PROJECT_NAME="${1:-}"
+SUB="${2:-}"
+PROJECT="$(resolve_project "$PROJECT_NAME")"
+[[ -n "$SUB" ]] || die "no command for '$PROJECT_NAME' (try: up, agent, chat, status)"
+shift 2
+
+# Everything except `agent` is handled by the shared driver.
+if [[ "$SUB" != "agent" ]]; then
+  exec "$CTR" --project "$PROJECT" "$SUB" "$@"
+fi
+
+# ---- agent: generate an opencode config and launch opencode ---------------
+URL="$(cat "$PROJECT/url.txt" 2>/dev/null || true)"
+if [[ -z "$URL" ]]; then
+  URL="$("$CTR" --project "$PROJECT" url || true)"
+fi
+[[ -n "$URL" ]] || die "no tunnel URL; run: ./bin/cluster $PROJECT_NAME up"
+
+MODEL_TYPE="$(python3 -c 'import sys;sys.path.insert(0,sys.argv[1]);import kernel_config as k;print(k.CFG.get("__MODEL_TYPE__","llm"))' "$PROJECT" 2>/dev/null || echo llm)"
+if [[ "$MODEL_TYPE" == "flux" ]]; then
+  die "'$PROJECT_NAME' is an image generation model, not a text LLM.
+  - Interactive Web UI: $URL
+  - CLI image generator: ./bin/cluster $PROJECT_NAME gen 'your prompt' -o output.png"
+fi
+
+command -v opencode >/dev/null 2>&1 || die "opencode not found.
+  Install it with:  npm i -g opencode-ai    (or: brew install sst/tap/opencode)
+  Then re-run:      ./bin/cluster $PROJECT_NAME agent"
+
+CFG="$PROJECT/.cluster/opencode.json"
+mkdir -p "$(dirname "$CFG")"
+
+python3 - "$PROJECT" "$URL" "$CFG" <<'PY'
+import json, os, sys
+project, url, out = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, project)
+import kernel_config as k
+CFG = k.CFG
+alias = CFG.get("__MODEL_ALIAS__", "model")
+name = CFG.get("__PROJECT_NAME__", alias)
+ctx = int(CFG.get("__CTX__", "32768"))
+cfg = {
+    "$schema": "https://opencode.ai/config.json",
+    "provider": {
+        "cluster": {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "Cluster (remote GPU)",
+            "options": {"baseURL": url.rstrip("/") + "/v1", "apiKey": "not-needed"},
+            "models": {
+                alias: {
+                    "name": f"{name} (Kaggle GPU)",
+                    "limit": {"context": ctx, "output": 8192},
+                }
+            },
+        }
+    },
+    "model": f"cluster/{alias}",
+}
+with open(out, "w") as f:
+    json.dump(cfg, f, indent=2)
+print(f"wrote {out}\n  baseURL {cfg['provider']['cluster']['options']['baseURL']}\n  model   cluster/{alias}")
+PY
+
+echo
+echo "launching opencode against $URL  (Ctrl-C or /exit to quit)"
+echo "the Kaggle session keeps running; stop it later with: ./bin/cluster $PROJECT_NAME stop"
+exec env OPENCODE_CONFIG="$CFG" opencode "$@"

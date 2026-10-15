@@ -22,7 +22,7 @@ public tunnel URL, so **nothing large is ever downloaded locally**.
    your PC                    Kaggle (GPU)                         internet
  ┌──────────┐   kaggle API   ┌──────────────────────────┐
  │ ctr.sh   │ ─────────────► │ notebook.ipynb           │
- │ saluki.py│                │  ├─ download GGUF 7.9 GB │
+ │cluster.py│                │  ├─ download GGUF 7.9 GB │
  └────┬─────┘                │  ├─ llama-server :8080   │
       │  HTTPS               │  └─ cloudflared tunnel   │
       └───────────────────────────────────────────────► trycloudflare.com
@@ -39,8 +39,11 @@ cd saluki
 ./ctr.sh url       # wait for startup, then save the public URL to url.txt
 ./ctr.sh test      # health check + a sample chat
 
-python3 saluki.py chat "Explain gated delta networks in two sentences."
-python3 saluki.py repl          # interactive multi-turn chat
+./ctr.sh chat "Explain gated delta networks in two sentences."
+./ctr.sh repl          # interactive multi-turn chat
+
+# or use the agent CLI from the repo root:
+../bin/cluster saluki agent
 ```
 
 Startup takes a few minutes: ~8 GB model download plus model load.
@@ -88,24 +91,24 @@ Each run publishes **two** cloudflared tunnels:
 
 ## Client
 
-`saluki.py` is stdlib-only — no `pip install` needed on your PC.
+The client is stdlib-only (`../lib/cluster.py`) — no `pip install` needed on your PC.
 
 ```bash
-python3 saluki.py health                       # {"status":"ok"}
-python3 saluki.py props                        # model + context info
-python3 saluki.py models                       # OpenAI-compatible model list
-python3 saluki.py slots                        # active context slots
+./ctr.sh health                       # {"status":"ok"}
+./ctr.sh props                        # model + context info
+./ctr.sh models                       # OpenAI-compatible model list
+./ctr.sh slots                        # active context slots
 
-python3 saluki.py chat "hello"                 # streaming, thinking ON
-python3 saluki.py chat --no-think "2+2?"       # fast, no reasoning phase
-python3 saluki.py repl                         # multi-turn; /new /think /nothink /quit
-python3 saluki.py tools "weather in Paris?"    # OpenAI tool-call demo
-python3 saluki.py tokenize "some text"         # token count + ids
-python3 saluki.py raw /props '{}'              # arbitrary POST to any path
+./ctr.sh chat "hello"                 # streaming, thinking ON
+./ctr.sh chat --no-think "2+2?"       # fast, no reasoning phase
+./ctr.sh repl                         # multi-turn; /new /think /nothink /quit
+./ctr.sh tools "weather in Paris?"    # OpenAI tool-call demo
+./ctr.sh tokenize "some text"         # token count + ids
+./ctr.sh raw /props '{}'              # arbitrary POST to any path
 ```
 
 Useful flags: `--system`, `--temperature`, `--top-p`, `--max-tokens`, `--no-think`.
-URL resolution order: `--url` → `$SALUKI_URL` → `url.txt`.
+URL resolution order: `--url` → `$CLUSTER_URL` → `url.txt`.
 
 ### Use it from any other tool
 
@@ -113,7 +116,7 @@ It is a plain OpenAI-compatible endpoint, so anything that speaks the OpenAI API
 works. Example:
 
 ```bash
-export OPENAI_BASE_URL="$(cat saluki/url.txt)/v1"
+export OPENAI_BASE_URL="$(cat url.txt)/v1"
 export OPENAI_API_KEY="not-needed"
 # then point your favourite client at model "saluki"
 ```
@@ -129,8 +132,8 @@ export OPENAI_API_KEY="not-needed"
 
 ## Configuration
 
-Edit the `CFG` block at the top of `saluki/make_notebook.py`, then re-run
-`python3 make_notebook.py` (or just `./ctr.sh push`, which regenerates first).
+Edit [`kernel_config.py`](kernel_config.py), then re-run `./ctr.sh push` (which
+regenerates the notebook first).
 
 | Key | Default | Notes |
 | --- | --- | --- |

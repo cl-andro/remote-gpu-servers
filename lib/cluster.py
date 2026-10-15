@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""saluki — control the Kaggle-hosted Underdog-Saluki-27B server from your PC.
+"""cluster — control a Kaggle-hosted inference server from your PC.
 
 The model runs on Kaggle. This script only sends HTTP requests to the public
 tunnel URL, so nothing large is ever downloaded locally.
@@ -8,13 +8,13 @@ Typical flow
 ------------
     ./ctr.sh push          # push the kernel to Kaggle and start it
     ./ctr.sh url           # read the public tunnel URL out of the run logs
-    python3 saluki.py health
-    python3 saluki.py chat "Explain gated delta networks in two sentences."
-    python3 saluki.py chat --no-think "2+2?"
-    python3 saluki.py stream "Write a haiku about GPUs."
-    python3 saluki.py tools "What's the weather in Paris and Tokyo?"
+    python3 lib/cluster.py health
+    python3 lib/cluster.py chat "Explain gated delta networks in two sentences."
+    python3 lib/cluster.py chat --no-think "2+2?"
+    python3 lib/cluster.py stream "Write a haiku about GPUs."
+    python3 lib/cluster.py tools "What's the weather in Paris and Tokyo?"
 
-URL resolution order: --url flag > $SALUKI_URL > url.txt next to this script.
+URL resolution order: --url flag > $CLUSTER_URL > url.txt in the project dir.
 """
 
 from __future__ import annotations
@@ -27,8 +27,17 @@ import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-URL_FILE = os.path.join(HERE, "url.txt")
-TIMEOUT = int(os.environ.get("SALUKI_TIMEOUT", "600"))
+ROOT = os.path.dirname(HERE)
+TIMEOUT = int(os.environ.get("CLUSTER_TIMEOUT") or os.environ.get("SALUKI_TIMEOUT", "600"))
+DEFAULT_MODEL = os.environ.get("CLUSTER_MODEL", "model")
+# `--project <dir>` points at the project folder that owns url.txt.
+PROJECT = os.environ.get("CLUSTER_PROJECT", "")
+
+
+def url_file() -> str:
+    if PROJECT:
+        return os.path.join(PROJECT, "url.txt")
+    return os.path.join(ROOT, "url.txt")
 
 RESET = "\033[0m"
 DIM = "\033[2m"
@@ -39,15 +48,16 @@ RED = "\033[31m"
 
 
 def resolve_url(explicit: str | None) -> str:
-    url = explicit or os.environ.get("SALUKI_URL") or ""
-    if not url and os.path.exists(URL_FILE):
-        url = open(URL_FILE).read().strip()
+    url = explicit or os.environ.get("CLUSTER_URL") or os.environ.get("SALUKI_URL") or ""
+    path = url_file()
+    if not url and os.path.exists(path):
+        url = open(path).read().strip()
     if not url:
         sys.exit(
             "No server URL.\n"
             "  - run './ctr.sh url' to fetch it from the Kaggle logs, or\n"
             "  - pass --url https://xxxx.trycloudflare.com, or\n"
-            "  - export SALUKI_URL=..."
+            "  - export CLUSTER_URL=..."
         )
     return url.rstrip("/")
 
@@ -135,7 +145,7 @@ def build_messages(system: str | None, prompt: str, history: list) -> list:
 def run_chat(a, history: list) -> None:
     url = resolve_url(a.url)
     payload = {
-        "model": "saluki",
+        "model": a.model,
         "messages": build_messages(a.system, a.prompt, history),
         "temperature": a.temperature,
         "top_p": a.top_p,
@@ -170,7 +180,7 @@ def cmd_tools(a) -> None:
         }
     ]
     payload = {
-        "model": "saluki",
+        "model": a.model,
         "messages": [{"role": "user", "content": a.prompt}],
         "tools": tools,
         "tool_choice": "auto",
@@ -210,8 +220,41 @@ def cmd_tokenize(a) -> None:
     print(obj.get("tokens"))
 
 
+def cmd_gen(a) -> None:
+    """Generate an image from a prompt via /v1/images/generations."""
+    import base64
+    url = resolve_url(a.url)
+    payload = {
+        "prompt": a.prompt,
+        "size": a.size or "1024x1024",
+        "n": 1,
+        "response_format": "b64_json",
+    }
+    if getattr(a, "steps", None) is not None:
+        payload["steps"] = int(a.steps)
+    if getattr(a, "seed", None) is not None:
+        payload["seed"] = int(a.seed)
+
+    print(f"{CYAN}generating image{RESET} ({payload['size']}) -> {a.out} ...")
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        f"{url}/v1/images/generations",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        res = json.load(resp)
+        b64_data = res["data"][0]["b64_json"]
+        img_bytes = base64.b64decode(b64_data)
+        out_path = a.out or "output.png"
+        with open(out_path, "wb") as f:
+            f.write(img_bytes)
+        print(f"{GREEN}saved image{RESET} ({len(img_bytes)} bytes) to: {out_path}")
+
+
 def cmd_raw(a) -> None:
-    """POST arbitrary JSON to an arbitrary path:  saluki.py raw /props '{}'"""
+    """POST arbitrary JSON to an arbitrary path:  cluster.py raw /props '{}'"""
     url = resolve_url(a.url)
     req = urllib.request.Request(
         url + a.path,
@@ -253,7 +296,7 @@ def cmd_repl(a) -> None:
             continue
 
         payload = {
-            "model": "saluki",
+            "model": a.model,
             "messages": build_messages(a.system, line, history),
             "temperature": a.temperature,
             "top_p": a.top_p,
@@ -271,9 +314,11 @@ def cmd_repl(a) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(prog="saluki", description=__doc__,
+    p = argparse.ArgumentParser(prog="cluster", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--url", help="override the tunnel URL")
+    p.add_argument("--model", default=DEFAULT_MODEL,
+                   help="model id sent to the server (any value; llama-server ignores it)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def add_common(sp, need_prompt=True):
@@ -318,6 +363,14 @@ def main() -> None:
     sp.add_argument("path")
     sp.add_argument("body", nargs="?", default="{}")
     sp.set_defaults(func=cmd_raw)
+
+    sp = sub.add_parser("gen", help="generate image via /v1/images/generations")
+    sp.add_argument("prompt", help="prompt text describing the image")
+    sp.add_argument("--size", default="1024x1024", help="image size (e.g. 1024x1024, 768x768, 512x512)")
+    sp.add_argument("--steps", default=None, help="inference steps (1-4)")
+    sp.add_argument("--seed", default=None, help="random seed (integer)")
+    sp.add_argument("--out", "-o", default="output.png", help="output file path (default output.png)")
+    sp.set_defaults(func=cmd_gen)
 
     a = p.parse_args()
     if a.cmd == "tools" and not getattr(a, "prompt", None):
