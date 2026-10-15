@@ -47,13 +47,17 @@ URL_FILE="$PROJECT/url.txt"
 STOP_URL_FILE="$PROJECT/stop_url.txt"
 
 if [[ -f "$ENV_FILE" ]]; then
-  while IFS='=' read -r key val || [[ -n "$key" ]]; do
-    [[ "$key" =~ ^[[:space:]]*# ]] && continue
-    [[ -z "$key" ]] && continue
-    key="$(echo "$key" | tr -d '[:space:]')"
-    val="$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
-    if [[ -n "$key" && -n "$val" ]]; then
-      export "$key"="$val"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    if [[ "$line" == *=* ]]; then
+      key="${line%%=*}"
+      val="${line#*=}"
+      key="$(echo "$key" | tr -d '[:space:]')"
+      val="$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
+      if [[ -n "$key" ]]; then
+        export "$key"="$val"
+      fi
     fi
   done < "$ENV_FILE"
   TOKEN="$(grep -m1 -oE 'KGAT_[A-Za-z0-9]+' "$ENV_FILE" || true)"
@@ -100,7 +104,7 @@ extract_url() {
     | tail -1 | sed 's/^CONTROL_URL=//')"
   if [[ -n "$marker" ]]; then echo "$marker"; return 0; fi
   printf '%s\n' "$out" \
-    | grep -oE 'https://[a-zA-Z0-9.-]+' \
+    | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' \
     | tail -1
 }
 

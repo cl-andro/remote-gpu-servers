@@ -216,6 +216,9 @@ if AUTH_ENABLED:
         def log_message(self, *a): pass
 
         def _check_auth(self):
+            path = self.path.split("?")[0].rstrip("/")
+            if path in ("/health", "/healthz"):
+                return True
             auth = self.headers.get("Authorization", "")
             if auth.startswith("Basic "):
                 try:
@@ -325,9 +328,14 @@ def start_public_tunnel(url, log_path):
     fh = open(log_path, "w")
     if CF_TOKEN:
         print("Starting named Cloudflare tunnel with token...", flush=True)
-        subprocess.Popen([CF, "tunnel", "--no-autoupdate", "run", "--token", CF_TOKEN, "--url", url],
-                         stdout=fh, stderr=subprocess.STDOUT)
-        time.sleep(3)
+        proc = subprocess.Popen([CF, "tunnel", "--no-autoupdate", "run", "--token", CF_TOKEN, "--url", url],
+                                stdout=fh, stderr=subprocess.STDOUT)
+        time.sleep(5)
+        if proc.poll() is not None:
+            fh.flush()
+            print("cloudflared failed to start! Log tail:", flush=True)
+            print(open(log_path).read()[-2000:], flush=True)
+            raise RuntimeError("named cloudflared tunnel exited immediately")
         return STATIC_URL or "https://ai.883742.xyz"
     else:
         subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
@@ -382,6 +390,8 @@ import time, urllib.request
 
 PORT = int("__PORT__")
 SERVE_MINUTES = int("__SERVE_MINUTES__")
+AUTH_USER = "__AUTH_USER__"
+AUTH_PASS = "__AUTH_PASS__"
 
 url = open("/kaggle/working/CONTROL_URL.txt").read().strip()
 print(f"serving for ~{SERVE_MINUTES} minutes at {url}", flush=True)
@@ -396,7 +406,12 @@ for minute in range(SERVE_MINUTES):
         print("STOP received from control tunnel -> ending session", flush=True)
         break
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/health", timeout=5) as r:
+        req = urllib.request.Request(f"http://127.0.0.1:{PORT}/health")
+        if AUTH_USER and AUTH_PASS:
+            import base64
+            auth_str = base64.b64encode(f"{AUTH_USER}:{AUTH_PASS}".encode()).decode()
+            req.add_header("Authorization", f"Basic {auth_str}")
+        with urllib.request.urlopen(req, timeout=5) as r:
             status = str(r.status)
     except Exception as e:
         status = f"err {e}"
@@ -708,6 +723,9 @@ class ServerHandler(http.server.BaseHTTPRequestHandler):
     def _check_auth(self):
         if not AUTH_ENABLED:
             return True
+        path = self.path.split("?")[0].rstrip("/")
+        if path in ("/health", "/v1/health", "/healthz"):
+            return True
         auth = self.headers.get("Authorization", "")
         if auth.startswith("Basic "):
             try:
@@ -867,9 +885,14 @@ def start_public_tunnel(url, log_path):
     fh = open(log_path, "w")
     if CF_TOKEN:
         print("Starting named Cloudflare tunnel with token...", flush=True)
-        subprocess.Popen([CF, "tunnel", "--no-autoupdate", "run", "--token", CF_TOKEN, "--url", url],
-                         stdout=fh, stderr=subprocess.STDOUT)
-        time.sleep(3)
+        proc = subprocess.Popen([CF, "tunnel", "--no-autoupdate", "run", "--token", CF_TOKEN, "--url", url],
+                                stdout=fh, stderr=subprocess.STDOUT)
+        time.sleep(5)
+        if proc.poll() is not None:
+            fh.flush()
+            print("cloudflared failed to start! Log tail:", flush=True)
+            print(open(log_path).read()[-2000:], flush=True)
+            raise RuntimeError("named cloudflared tunnel exited immediately")
         return STATIC_URL or "https://ai.883742.xyz"
     else:
         subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
@@ -1140,6 +1163,9 @@ class ServerHandler(http.server.BaseHTTPRequestHandler):
     def _check_auth(self):
         if not AUTH_ENABLED:
             return True
+        path = self.path.split("?")[0].rstrip("/")
+        if path in ("/health", "/v1/health", "/healthz"):
+            return True
         auth = self.headers.get("Authorization", "")
         if auth.startswith("Basic "):
             try:
@@ -1298,9 +1324,14 @@ def start_public_tunnel(url, log_path):
     fh = open(log_path, "w")
     if CF_TOKEN:
         print("Starting named Cloudflare tunnel with token...", flush=True)
-        subprocess.Popen([CF, "tunnel", "--no-autoupdate", "run", "--token", CF_TOKEN, "--url", url],
-                         stdout=fh, stderr=subprocess.STDOUT)
-        time.sleep(3)
+        proc = subprocess.Popen([CF, "tunnel", "--no-autoupdate", "run", "--token", CF_TOKEN, "--url", url],
+                                stdout=fh, stderr=subprocess.STDOUT)
+        time.sleep(5)
+        if proc.poll() is not None:
+            fh.flush()
+            print("cloudflared failed to start! Log tail:", flush=True)
+            print(open(log_path).read()[-2000:], flush=True)
+            raise RuntimeError("named cloudflared tunnel exited immediately")
         return STATIC_URL or "https://ai.883742.xyz"
     else:
         subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],

@@ -28,6 +28,20 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+
+env_path = os.path.join(ROOT, ".env")
+if os.path.exists(env_path):
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip("'\"")
+            if k not in os.environ and v:
+                os.environ[k] = v
+
 TIMEOUT = int(os.environ.get("CLUSTER_TIMEOUT") or os.environ.get("SALUKI_TIMEOUT", "600"))
 DEFAULT_MODEL = os.environ.get("CLUSTER_MODEL", "model")
 # `--project <dir>` points at the project folder that owns url.txt.

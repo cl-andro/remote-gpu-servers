@@ -77,6 +77,19 @@ def load_cfg(project_dir: str) -> dict:
     path = os.path.join(project_dir, "kernel_config.py")
     if not os.path.exists(path):
         raise SystemExit(f"missing {path}")
+    env_file = os.path.join(os.path.dirname(HERE), ".env")
+    if os.path.exists(env_file):
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip("'\"")
+                if k not in os.environ and v:
+                    os.environ[k] = v
+
     spec = importlib.util.spec_from_file_location("kernel_config", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
