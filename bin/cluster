@@ -88,7 +88,7 @@ fi
 [[ -n "$URL" ]] || die "no tunnel URL; run: ./bin/cluster $PROJECT_NAME up"
 
 MODEL_TYPE="$(python3 -c 'import sys;sys.path.insert(0,sys.argv[1]);import kernel_config as k;print(k.CFG.get("__MODEL_TYPE__","llm"))' "$PROJECT" 2>/dev/null || echo llm)"
-if [[ "$MODEL_TYPE" == "flux" || "$MODEL_TYPE" == "sdxl" ]]; then
+if [[ "$MODEL_TYPE" == "flux" || "$MODEL_TYPE" == "sdxl" || "$MODEL_TYPE" == "omnigen" || "$MODEL_TYPE" == "janus" ]]; then
   die "'$PROJECT_NAME' is an image generation model, not a text LLM.
   - Interactive Web UI: $URL
   - CLI image generator: ./bin/cluster $PROJECT_NAME gen 'your prompt' -o output.png"

@@ -268,6 +268,18 @@ def cmd_gen(a) -> None:
         payload["steps"] = int(a.steps)
     if getattr(a, "seed", None) is not None:
         payload["seed"] = int(a.seed)
+    if getattr(a, "image", None):
+        import mimetypes
+        encoded = []
+        for p in a.image:
+            if os.path.exists(p):
+                mime = mimetypes.guess_type(p)[0] or "image/png"
+                with open(p, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+                    encoded.append(f"data:{mime};base64,{b64}")
+            else:
+                encoded.append(p)
+        payload["input_images"] = encoded
 
     print(f"{CYAN}generating image{RESET} ({payload['size']}) -> {a.out} ...")
     data = json.dumps(payload).encode()
@@ -400,8 +412,10 @@ def main() -> None:
 
     sp = sub.add_parser("gen", help="generate image via /v1/images/generations")
     sp.add_argument("prompt", help="prompt text describing the image")
+    sp.add_argument("--image", "-i", action="append", default=[],
+                    help="reference input image file (can be specified multiple times)")
     sp.add_argument("--size", default="1024x1024", help="image size (e.g. 1024x1024, 768x768, 512x512)")
-    sp.add_argument("--steps", default=None, help="inference steps (1-4)")
+    sp.add_argument("--steps", default=None, help="inference steps")
     sp.add_argument("--seed", default=None, help="random seed (integer)")
     sp.add_argument("--out", "-o", default="output.png", help="output file path (default output.png)")
     sp.set_defaults(func=cmd_gen)

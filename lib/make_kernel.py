@@ -23,7 +23,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from cells import CELLS, FLUX_CELLS, SDXL_CELLS  # noqa: E402
+from cells import CELLS, FLUX_CELLS, SDXL_CELLS, OMNIGEN_CELLS, JANUS_CELLS  # noqa: E402
 
 # Placeholders whose value is not allowed to be empty.
 REQUIRED_LLM = (
@@ -61,6 +61,27 @@ DEFAULTS_SDXL = {
     "__DEFAULT_HEIGHT__": "512",
     "__MODEL_FILE__": "sdxl-turbo",
     "__MODEL_SIZE_GB__": "6.0",
+}
+
+REQUIRED_OMNIGEN = (
+    "__PROJECT_NAME__", "__MODEL_REPO__", "__PORT__", "__CTL_PORT__",
+    "__SERVE_MINUTES__", "__MODEL_ALIAS__",
+)
+
+DEFAULTS_OMNIGEN = {
+    "__DEFAULT_STEPS__": "30",
+    "__DEFAULT_WIDTH__": "1024",
+    "__DEFAULT_HEIGHT__": "1024",
+}
+
+REQUIRED_JANUS = (
+    "__PROJECT_NAME__", "__MODEL_REPO__", "__PORT__", "__CTL_PORT__",
+    "__SERVE_MINUTES__", "__MODEL_ALIAS__",
+)
+
+DEFAULTS_JANUS = {
+    "__DEFAULT_CFG__": "5.0",
+    "__DEFAULT_TEMP__": "1.0",
 }
 
 
@@ -102,6 +123,12 @@ def load_cfg(project_dir: str) -> dict:
     elif model_type == "sdxl":
         defaults = dict(DEFAULTS_SDXL)
         required = REQUIRED_SDXL
+    elif model_type == "omnigen":
+        defaults = dict(DEFAULTS_OMNIGEN)
+        required = REQUIRED_OMNIGEN
+    elif model_type == "janus":
+        defaults = dict(DEFAULTS_JANUS)
+        required = REQUIRED_JANUS
     else:
         defaults = dict(DEFAULTS_LLM)
         required = REQUIRED_LLM
@@ -149,6 +176,10 @@ def main() -> None:
         template_cells = FLUX_CELLS
     elif model_type == "sdxl":
         template_cells = SDXL_CELLS
+    elif model_type == "omnigen":
+        template_cells = OMNIGEN_CELLS
+    elif model_type == "janus":
+        template_cells = JANUS_CELLS
     else:
         template_cells = CELLS
     cells = [render(c, cfg) for c in template_cells]
