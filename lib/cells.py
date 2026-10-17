@@ -1384,27 +1384,53 @@ SDXL_CELLS = [CELL_1_ENV, CELL_2_SDXL_DEPS, CELL_3_SDXL_SERVE, CELL_5_KEEPALIVE]
 
 CELL_2_OMNIGEN_DEPS = r'''
 # --- Cell 2: install dependencies for OmniGen inference -------------------
-import subprocess, sys
+import subprocess, sys, os
 
 pkgs = [
-    "OmniGen>=1.0.3",
     "accelerate>=0.33.0",
     "diffusers>=0.30.0",
     "transformers>=4.45.0",
     "sentencepiece",
     "timm",
+    "peft>=0.9.0",
+    "datasets",
+    "safetensors",
 ]
-print("installing:", " ".join(pkgs), flush=True)
+print("installing dependencies:", " ".join(pkgs), flush=True)
 subprocess.run([sys.executable, "-m", "pip", "install", "-q"] + pkgs, check=True)
-print("OmniGen packages installed.", flush=True)
+
+print("installing OmniGen (using --no-deps to avoid PyTorch downgrade conflicts)...", flush=True)
+installed = False
+try:
+    subprocess.run([sys.executable, "-m", "pip", "install", "--no-deps", "-q", "git+https://github.com/VectorSpaceLab/OmniGen.git"], check=True)
+    installed = True
+except Exception as e:
+    print("pip git install failed, trying fallback:", e, flush=True)
+
+if not installed:
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "install", "--no-deps", "-q", "OmniGen>=1.0.3"], check=True)
+        installed = True
+    except Exception as e:
+        print("pip pypi install failed:", e, flush=True)
+
+if not installed or not os.path.exists("/kaggle/temp/OmniGen"):
+    print("cloning OmniGen repository directly as safeguard...", flush=True)
+    subprocess.run(["git", "clone", "--depth=1", "https://github.com/VectorSpaceLab/OmniGen.git", "/kaggle/temp/OmniGen"], check=False)
+
+print("OmniGen setup completed.", flush=True)
 '''
 
 CELL_3_OMNIGEN_SERVE = r'''
 # --- Cell 3: load OmniGen pipeline + start server + open tunnels ----------
-import os, re, subprocess, time, urllib.request, json, threading, http.server
+import os, re, subprocess, time, urllib.request, json, threading, http.server, sys
 import base64, io, gc
 import torch
 from PIL import Image
+
+if os.path.exists("/kaggle/temp/OmniGen") and "/kaggle/temp/OmniGen" not in sys.path:
+    sys.path.insert(0, "/kaggle/temp/OmniGen")
+
 from OmniGen import OmniGenPipeline
 
 PORT = int("__PORT__")
