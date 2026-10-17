@@ -1877,7 +1877,6 @@ class ServerHandler(http.server.BaseHTTPRequestHandler):
             seed = int(req.get("seed", 0)) if req.get("seed") is not None else None
             max_input_image_size = int(req.get("max_input_image_size", 512))
             separate_cfg_infer = bool(req.get("separate_cfg_infer", True))
-            offload_model = bool(req.get("offload_model", True if local_paths else False))
             use_kv_cache = bool(req.get("use_kv_cache", True))
             offload_kv_cache = bool(req.get("offload_kv_cache", True))
 
@@ -1900,6 +1899,9 @@ class ServerHandler(http.server.BaseHTTPRequestHandler):
                     local_paths.append(dest_path)
                 elif os.path.exists(item):
                     local_paths.append(item)
+
+            user_offload = req.get("offload_model")
+            offload_model = bool(user_offload) if user_offload is not None else bool(local_paths)
 
             print(f"Generating OmniGen ({width}x{height}, {steps} steps, {len(local_paths)} ref images, offload={offload_model}, max_input={max_input_image_size})...", flush=True)
             t0 = time.time()
