@@ -1418,6 +1418,18 @@ if os.path.exists(sched_path):
     with open(sched_path, "w") as f:
         f.write(code)
 
+trans_path = os.path.join(OMNIGEN_DIR, "OmniGen", "transformer.py")
+if os.path.exists(trans_path):
+    print("patching OmniGen transformer for position_embeddings...", flush=True)
+    with open(trans_path, "r") as f:
+        tcode = f.read()
+    tcode = tcode.replace(
+        "layer_outputs = decoder_layer(\n                    hidden_states,\n                    attention_mask=attention_mask,\n                    position_ids=position_ids,\n                    past_key_value=past_key_values,\n                    output_attentions=output_attentions,\n                    use_cache=use_cache,\n                    cache_position=cache_position,\n                )",
+        "pos_emb = self.rotary_emb(hidden_states, position_ids=position_ids) if hasattr(self, 'rotary_emb') else None\n                layer_outputs = decoder_layer(\n                    hidden_states,\n                    attention_mask=attention_mask,\n                    position_ids=position_ids,\n                    past_key_value=past_key_values,\n                    output_attentions=output_attentions,\n                    use_cache=use_cache,\n                    cache_position=cache_position,\n                    position_embeddings=pos_emb,\n                )"
+    )
+    with open(trans_path, "w") as f:
+        f.write(tcode)
+
 subprocess.run([sys.executable, "-m", "pip", "install", "--no-deps", "-q", "-e", OMNIGEN_DIR], check=False)
 print("OmniGen setup completed successfully.", flush=True)
 '''
@@ -1453,6 +1465,26 @@ try:
         rope_utils.RoPEScalingValidator.validate_rope = lambda self: None
 except Exception:
     pass
+
+# Patch Phi3Attention.forward if position_embeddings is None
+try:
+    import transformers.models.phi3.modeling_phi3 as phi3_mod
+    orig_attn_forward = phi3_mod.Phi3Attention.forward
+    def patched_attn_forward(self, hidden_states, position_embeddings=None, *args, **kwargs):
+        if position_embeddings is None:
+            if not hasattr(self, "rotary_emb"):
+                self.rotary_emb = phi3_mod.Phi3RotaryEmbedding(self.config).to(
+                    device=hidden_states.device, dtype=hidden_states.dtype
+                )
+            position_ids = kwargs.get("position_ids")
+            if position_ids is None:
+                seq_len = hidden_states.shape[1]
+                position_ids = torch.arange(seq_len, device=hidden_states.device).unsqueeze(0)
+            position_embeddings = self.rotary_emb(hidden_states, position_ids=position_ids)
+        return orig_attn_forward(self, hidden_states, position_embeddings, *args, **kwargs)
+    phi3_mod.Phi3Attention.forward = patched_attn_forward
+except Exception as e:
+    print("attn patch note:", e, flush=True)
 
 OMNIGEN_DIR = "/kaggle/temp/OmniGen"
 if os.path.exists(OMNIGEN_DIR) and OMNIGEN_DIR not in sys.path:
