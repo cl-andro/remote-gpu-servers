@@ -2355,3 +2355,442 @@ print("Stop from PC   : ctr.sh stop   (uses the control tunnel above)")
 '''
 
 JANUS_CELLS = [CELL_1_ENV, CELL_2_JANUS_DEPS, CELL_3_JANUS_SERVE, CELL_5_KEEPALIVE]
+
+CELL_2_ZIMAGE_DEPS = r'''
+# --- Cell 2: install dependencies for Z-Image-Turbo inference ------------
+import subprocess, sys
+
+pkgs = [
+    "git+https://github.com/huggingface/diffusers",
+    "transformers>=4.45.0",
+    "accelerate>=0.33.0",
+    "sentencepiece",
+    "safetensors",
+]
+print("installing:", " ".join(pkgs), flush=True)
+subprocess.run([sys.executable, "-m", "pip", "install", "-q"] + pkgs, check=True)
+print("Z-Image packages installed.", flush=True)
+'''
+
+CELL_3_ZIMAGE_SERVE = r'''
+# --- Cell 3: load Z-Image-Turbo pipeline + start server + open tunnels ----
+import os, re, subprocess, time, urllib.request, json, threading, http.server
+import base64, io, gc
+import torch
+from diffusers import ZImagePipeline
+
+PORT = int("__PORT__")
+CTL_PORT = int("__CTL_PORT__")
+DEFAULT_STEPS = int("__DEFAULT_STEPS__" or "9")
+DEFAULT_WIDTH = int("__DEFAULT_WIDTH__" or "1024")
+DEFAULT_HEIGHT = int("__DEFAULT_HEIGHT__" or "1024")
+MODEL_REPO = "__MODEL_REPO__"
+
+STOP_REQUESTED = threading.Event()
+GEN_LOCK = threading.Lock()
+
+WORK = "/kaggle/temp/run"
+os.makedirs(WORK, exist_ok=True)
+CF_LOG = os.path.join(WORK, "cloudflared.log")
+CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
+
+# ---- cloudflared binary ----
+CF = "/kaggle/temp/cloudflared"
+if not os.path.exists(CF):
+    subprocess.run(["curl", "-sL", "-o", CF,
+                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
+                   check=True)
+    os.chmod(CF, 0o755)
+
+# ---- load pipeline ----
+print(f"Loading Z-Image-Turbo from {MODEL_REPO}...", flush=True)
+dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+pipe = ZImagePipeline.from_pretrained(
+    MODEL_REPO,
+    torch_dtype=dtype,
+    low_cpu_mem_usage=False,
+)
+if torch.cuda.get_device_properties(0).total_memory < 20e9:
+    print("Enabling model CPU offload for optimal VRAM management...", flush=True)
+    pipe.enable_model_cpu_offload()
+else:
+    pipe.to("cuda")
+print("Z-Image-Turbo pipeline loaded and ready on GPU!", flush=True)
+
+# ---- Control Server on CTL_PORT (port 8081) ----
+STOP_TOKEN = os.environ.get("CLUSTER_STOP_TOKEN") or os.urandom(8).hex()
+
+class CtlHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def _send(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path.rstrip("/") in ("", "/health"):
+            self._send(200, {"ok": True, "status": "up",
+                             "stopping": STOP_REQUESTED.is_set(),
+                             "model": "__MODEL_ALIAS__"})
+        elif self.path.startswith("/stop/" + STOP_TOKEN):
+            STOP_REQUESTED.set()
+            self._send(200, {"ok": True, "message": "shutdown requested"})
+            print("STOP_REQUESTED received via control tunnel", flush=True)
+        else:
+            self._send(404, {"ok": False, "error": "not found"})
+
+    def do_POST(self):
+        self.do_GET()
+
+ctl = http.server.ThreadingHTTPServer(("127.0.0.1", CTL_PORT), CtlHandler)
+threading.Thread(target=ctl.serve_forever, daemon=True).start()
+
+# ---- Z-Image Web UI and Server on PORT (port 8080) ----
+HTML_PAGE = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Z-Image-Turbo - 8-Step Ultra-Fast Generator</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  body { background: #080b12; color: #e1e7f0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 24px 16px; }
+  .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; width: 100%; max-width: 860px; padding: 28px; box-shadow: 0 12px 32px rgba(0,0,0,0.5); margin-bottom: 24px; }
+  h1 { font-size: 1.7rem; color: #fff; margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
+  .badge { font-size: 0.75rem; background: #ea580c; color: #fff; padding: 3px 10px; border-radius: 6px; font-weight: 700; }
+  p.subtitle { color: #9ca3af; font-size: 0.92rem; margin-bottom: 20px; line-height: 1.4; }
+  .speed-tag { background: #1e1b4b; border-left: 4px solid #f97316; padding: 10px 14px; border-radius: 6px; margin-bottom: 20px; font-size: 0.88rem; color: #cbd5e1; }
+  label { display: block; font-size: 0.85rem; font-weight: 600; color: #cbd5e1; margin-bottom: 6px; }
+  textarea { width: 100%; background: #080b12; border: 1px solid #374151; border-radius: 8px; color: #fff; padding: 12px; font-size: 0.95rem; min-height: 100px; resize: vertical; margin-bottom: 20px; }
+  textarea:focus { outline: none; border-color: #f97316; }
+  .row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 20px; }
+  select, input { width: 100%; background: #080b12; border: 1px solid #374151; border-radius: 8px; color: #fff; padding: 10px; font-size: 0.9rem; }
+  button { width: 100%; background: #ea580c; color: #fff; border: none; padding: 14px 20px; font-size: 1.05rem; font-weight: 700; border-radius: 8px; cursor: pointer; transition: background 0.2s; }
+  button:hover { background: #c2410c; }
+  button:disabled { background: #4b5563; cursor: not-allowed; }
+  #status { margin-top: 16px; font-size: 0.95rem; color: #fb923c; text-align: center; }
+  #preview { margin-top: 24px; text-align: center; }
+  #preview img { max-width: 100%; border-radius: 10px; box-shadow: 0 6px 20px rgba(0,0,0,0.6); }
+  .download-btn { margin-top: 14px; display: inline-block; background: #10b981; color: #fff; text-decoration: none; padding: 10px 20px; border-radius: 6px; font-size: 0.95rem; font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>⚡ Z-Image-Turbo <span class="badge">8-STEP TURBO</span></h1>
+  <p class="subtitle">Alibaba Tongyi Scalable Single-Stream Diffusion Transformer (6B S3-DiT) running on Kaggle GPU</p>
+
+  <div class="speed-tag">
+    ⚡ <strong>Ultra-Fast 8-Step Distillation:</strong> Generates crisp 1024x1024 photorealistic visuals and thumbnail artwork in ~3–5 seconds on Kaggle GPU!
+  </div>
+
+  <label for="prompt">Prompt Instruction</label>
+  <textarea id="prompt" placeholder="e.g. A dramatic YouTube thumbnail of Donald Trump, Vladimir Putin, and Volodymyr Zelenskyy seated around an intense negotiation table in a modern war room, dramatic side lighting, high contrast, 8k, photorealistic"></textarea>
+
+  <div class="row">
+    <div>
+      <label for="size">Resolution</label>
+      <select id="size">
+        <option value="1024x1024" selected>1024 × 1024</option>
+        <option value="1024x768">1024 × 768 (Landscape)</option>
+        <option value="768x1024">768 × 1024 (Portrait)</option>
+        <option value="768x768">768 × 768</option>
+        <option value="512x512">512 × 512 (Fastest)</option>
+      </select>
+    </div>
+    <div>
+      <label for="steps">Inference Steps</label>
+      <select id="steps">
+        <option value="9" selected>8 DiT Steps (Optimal)</option>
+        <option value="12">12 Steps (Detailed)</option>
+        <option value="6">6 Steps (Fast)</option>
+      </select>
+    </div>
+    <div>
+      <label for="seed">Seed (optional)</label>
+      <input id="seed" type="number" placeholder="Random">
+    </div>
+  </div>
+
+  <button id="genBtn" onclick="generate()">Generate Image</button>
+  <div id="status"></div>
+  <div id="preview"></div>
+</div>
+
+<script>
+async function generate() {
+  const prompt = document.getElementById('prompt').value.trim();
+  if (!prompt) return alert('Please enter a prompt');
+  const size = document.getElementById('size').value;
+  const steps = parseInt(document.getElementById('steps').value);
+  const seedVal = document.getElementById('seed').value;
+  const btn = document.getElementById('genBtn');
+  const status = document.getElementById('status');
+  const preview = document.getElementById('preview');
+
+  btn.disabled = true;
+  preview.innerHTML = '';
+  const startTime = Date.now();
+  status.textContent = 'Generating on Kaggle GPU with Z-Image-Turbo... (~3-8s)';
+
+  try {
+    const payload = { prompt, size, steps, response_format: 'b64_json' };
+    if (seedVal) payload.seed = parseInt(seedVal);
+
+    const resp = await fetch('/v1/images/generations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!resp.ok) {
+      const err = await resp.text();
+      throw new Error(`Server returned HTTP ${resp.status}: ${err}`);
+    }
+    const data = await resp.json();
+    const b64 = data.data[0].b64_json;
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    status.textContent = `Completed in ${elapsed}s!`;
+    const imgSrc = 'data:image/png;base64,' + b64;
+    preview.innerHTML = `
+      <img src="${imgSrc}" alt="Generated Image"><br>
+      <a class="download-btn" href="${imgSrc}" download="zimage-${Date.now()}.png">Download Full Resolution</a>
+    `;
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+</script>
+</body>
+</html>
+"""
+
+AUTH_USER = "__AUTH_USER__" or os.environ.get("CLUSTER_AUTH_USER", "")
+AUTH_PASS = "__AUTH_PASS__" or os.environ.get("CLUSTER_AUTH_PASS", "")
+AUTH_KEY = "__AUTH_KEY__" or os.environ.get("CLUSTER_API_KEY", "")
+AUTH_ENABLED = bool((AUTH_USER and AUTH_PASS) or AUTH_KEY)
+
+class ServerHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+
+    def _check_auth(self):
+        if not AUTH_ENABLED:
+            return True
+        path = self.path.split("?")[0].rstrip("/")
+        if path in ("/health", "/v1/health", "/healthz"):
+            return True
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Basic "):
+            try:
+                creds = base64.b64decode(auth[6:].strip()).decode("utf-8")
+                u, p = creds.split(":", 1)
+                if u == AUTH_USER and p == AUTH_PASS:
+                    return True
+            except Exception:
+                pass
+        elif auth.startswith("Bearer "):
+            token = auth[7:].strip()
+            if (AUTH_KEY and token == AUTH_KEY) or (AUTH_PASS and token == AUTH_PASS):
+                return True
+            try:
+                creds = base64.b64decode(token).decode("utf-8")
+                u, p = creds.split(":", 1)
+                if u == AUTH_USER and p == AUTH_PASS:
+                    return True
+            except Exception:
+                pass
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="AI Cluster Protected"')
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(b'{"error": "Unauthorized: valid username and password required"}\n')
+        return False
+
+    def _send_json(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.end_headers()
+
+    def do_HEAD(self):
+        if not self._check_auth(): return
+        self.do_GET()
+
+    def do_GET(self):
+        if not self._check_auth(): return
+        path = self.path.split("?")[0].rstrip("/")
+        if path in ("", "/index.html"):
+            body = HTML_PAGE.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path in ("/health", "/v1/health"):
+            self._send_json(200, {
+                "status": "ok",
+                "model": "__MODEL_ALIAS__",
+                "architecture": "z-image-turbo",
+                "device": "cuda" if torch.cuda.is_available() else "cpu"
+            })
+        elif path in ("/models", "/v1/models"):
+            self._send_json(200, {
+                "data": [{
+                    "id": "__MODEL_ALIAS__",
+                    "object": "model",
+                    "type": "image-generation"
+                }]
+            })
+        else:
+            self._send_json(404, {"error": f"Path {path} not found"})
+
+    def do_POST(self):
+        if not self._check_auth(): return
+        path = self.path.split("?")[0].rstrip("/")
+        content_len = int(self.headers.get("Content-Length", 0))
+        post_data = self.rfile.read(content_len) if content_len > 0 else b"{}"
+        try:
+            req = json.loads(post_data.decode("utf-8"))
+        except Exception:
+            return self._send_json(400, {"error": "Invalid JSON payload"})
+
+        if path in ("/v1/images/generations", "/generate"):
+            prompt = req.get("prompt", "")
+            if not prompt:
+                return self._send_json(400, {"error": "Missing prompt"})
+
+            size = req.get("size", "1024x1024")
+            try:
+                width, height = map(int, size.lower().split("x"))
+            except Exception:
+                width = int(req.get("width", DEFAULT_WIDTH))
+                height = int(req.get("height", DEFAULT_HEIGHT))
+
+            steps = int(req.get("steps", DEFAULT_STEPS))
+            seed = int(req.get("seed", 0)) if req.get("seed") is not None else None
+            gen = torch.Generator("cuda").manual_seed(seed) if seed is not None else None
+
+            print(f"Generating Z-Image-Turbo ({width}x{height}, {steps} steps) for: {prompt[:80]}...", flush=True)
+            t0 = time.time()
+            with GEN_LOCK:
+                out = pipe(
+                    prompt=prompt,
+                    height=height,
+                    width=width,
+                    num_inference_steps=steps,
+                    guidance_scale=0.0,
+                    generator=gen,
+                )
+                img = out.images[0]
+            elapsed = round(time.time() - t0, 2)
+            print(f"Z-Image generation done in {elapsed}s", flush=True)
+
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            b64_bytes = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+            if path == "/generate":
+                return self._send_json(200, {
+                    "image_b64": b64_bytes,
+                    "prompt": prompt,
+                    "width": width,
+                    "height": height,
+                    "steps": steps,
+                    "elapsed_seconds": elapsed
+                })
+            else:
+                return self._send_json(200, {
+                    "created": int(time.time()),
+                    "data": [
+                        {
+                            "b64_json": b64_bytes,
+                            "revised_prompt": prompt
+                        }
+                    ]
+                })
+        else:
+            self._send_json(404, {"error": f"POST {path} not supported"})
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), ServerHandler)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+print("Z-Image server running on port", PORT, flush=True)
+
+# ---- publish both tunnels ----
+CF_TOKEN = "__CLOUDFLARE_TUNNEL_TOKEN__" or os.environ.get("CLOUDFLARE_TUNNEL_TOKEN", "")
+STATIC_URL = "__STATIC_URL__" or os.environ.get("CLUSTER_URL", "")
+
+def start_public_tunnel(url, log_path):
+    fh = open(log_path, "w")
+    if CF_TOKEN:
+        print("Starting named Cloudflare tunnel with token...", flush=True)
+        proc = subprocess.Popen([CF, "tunnel", "--no-autoupdate", "run", "--token", CF_TOKEN, "--url", url],
+                                stdout=fh, stderr=subprocess.STDOUT)
+        time.sleep(5)
+        if proc.poll() is not None:
+            fh.flush()
+            print("cloudflared failed to start! Log tail:", flush=True)
+            print(open(log_path).read()[-2000:], flush=True)
+            raise RuntimeError("named cloudflared tunnel exited immediately")
+        return STATIC_URL or "https://ai.883742.xyz"
+    else:
+        subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
+                         stdout=fh, stderr=subprocess.STDOUT)
+        for _ in range(60):
+            time.sleep(2)
+            m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open(log_path).read())
+            if m:
+                return m.group(0)
+        return None
+
+def start_tunnel(url, log_path):
+    fh = open(log_path, "w")
+    subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
+                     stdout=fh, stderr=subprocess.STDOUT)
+    for _ in range(60):
+        time.sleep(2)
+        m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open(log_path).read())
+        if m:
+            return m.group(0)
+    return None
+
+public_url = start_public_tunnel(f"http://127.0.0.1:{PORT}", CF_LOG)
+control_url = start_tunnel(f"http://127.0.0.1:{CTL_PORT}", CTL_LOG)
+
+if not public_url:
+    print("cloudflared log:", open(CF_LOG).read()[-2000:], flush=True)
+    raise RuntimeError("could not obtain a public tunnel URL")
+if not control_url:
+    print("control cloudflared log:", open(CTL_LOG).read()[-2000:], flush=True)
+    raise RuntimeError("could not obtain a control tunnel URL")
+
+with open("/kaggle/working/CONTROL_URL.txt", "w") as f:
+    f.write(public_url + "\n")
+with open("/kaggle/working/STOP_URL.txt", "w") as f:
+    f.write(control_url + "/stop/" + STOP_TOKEN + "\n")
+
+print("=" * 72)
+print("CONTROL_URL=" + public_url)
+print("STOP_URL=" + control_url + "/stop/" + STOP_TOKEN)
+print("MODEL=" + "__MODEL_REPO__")
+print("=" * 72)
+print(f"Web UI         : {public_url}")
+print(f"API endpoint   : {public_url}/v1/images/generations")
+print(f"Health         : {public_url}/health")
+print("Stop from PC   : ctr.sh stop   (uses the control tunnel above)")
+'''
+
+Z_IMAGE_CELLS = [CELL_1_ENV, CELL_2_ZIMAGE_DEPS, CELL_3_ZIMAGE_SERVE, CELL_5_KEEPALIVE]

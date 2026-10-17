@@ -219,7 +219,7 @@ PY
     [[ -z "$URL" ]] && { echo "no URL; run ./bin/cluster $(basename "$PROJECT") url first" >&2; exit 1; }
     echo "== health =="
     python3 "$CLIENT" --url "$URL" --model "$MODEL_ALIAS" health
-    if [[ "$MODEL_TYPE" == "flux" || "$MODEL_TYPE" == "sdxl" || "$MODEL_TYPE" == "omnigen" || "$MODEL_TYPE" == "janus" ]]; then
+    if [[ "$MODEL_TYPE" == "flux" || "$MODEL_TYPE" == "sdxl" || "$MODEL_TYPE" == "omnigen" || "$MODEL_TYPE" == "janus" || "$MODEL_TYPE" == "zimage" ]]; then
       echo "== test image generation (512x512) =="
       python3 "$CLIENT" --url "$URL" --model "$MODEL_ALIAS" gen \
         "a golden metallic robot in a futuristic desert, sharp focus, 8k" \

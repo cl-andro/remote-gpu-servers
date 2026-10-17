@@ -28,6 +28,7 @@ sessions, ~30 GPU-h/week). Sizes are the quantized GGUF weights.
 ### 🎨 Image Generation
 | Project | Model | Type | Size | Steps / Ctx | Best for |
 | --- | --- | --- | --- | --- | --- |
+| [`z-image-turbo/`](z-image-turbo/) | Z-Image-Turbo (Alibaba) | 6B S3-DiT (BF16) | 12.0 GB | 8 steps | ⚡ Ultra-fast photorealism, world leader thumbnails & bilingual text |
 | [`flux1-schnell/`](flux1-schnell/) | FLUX.1-schnell | 12B MMDiT (GGUF Q4_K_S) | 6.3 GB | 4 steps | SOTA photorealistic diffusion transformer |
 | [`omnigen/`](omnigen/) | OmniGen-v1 (BAAI) | 3.8B Unified Multimodal | 7.7 GB | 30 steps | 🏆 Multi-subject thumbnails, reference photo composition |
 | [`janus-pro-7b/`](janus-pro-7b/) | Janus-Pro-7B (DeepSeek) | 7B Unified Multimodal | 14.0 GB | DeepSeek | Instruction-driven visual generation & multimodal reasoning |
