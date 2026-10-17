@@ -1395,30 +1395,31 @@ pkgs = [
     "peft>=0.9.0",
     "datasets",
     "safetensors",
+    "torchvision",
 ]
 print("installing dependencies:", " ".join(pkgs), flush=True)
 subprocess.run([sys.executable, "-m", "pip", "install", "-q"] + pkgs, check=True)
 
-print("installing OmniGen (using --no-deps to avoid PyTorch downgrade conflicts)...", flush=True)
-installed = False
-try:
-    subprocess.run([sys.executable, "-m", "pip", "install", "--no-deps", "-q", "git+https://github.com/VectorSpaceLab/OmniGen.git"], check=True)
-    installed = True
-except Exception as e:
-    print("pip git install failed, trying fallback:", e, flush=True)
+OMNIGEN_DIR = "/kaggle/temp/OmniGen"
+if not os.path.exists(OMNIGEN_DIR):
+    print("cloning OmniGen repository...", flush=True)
+    subprocess.run(["git", "clone", "--depth=1", "https://github.com/VectorSpaceLab/OmniGen.git", OMNIGEN_DIR], check=True)
 
-if not installed:
-    try:
-        subprocess.run([sys.executable, "-m", "pip", "install", "--no-deps", "-q", "OmniGen>=1.0.3"], check=True)
-        installed = True
-    except Exception as e:
-        print("pip pypi install failed:", e, flush=True)
+# Patch scheduler.py to fix unused OffloadedCache import removed in newer transformers
+sched_path = os.path.join(OMNIGEN_DIR, "OmniGen", "scheduler.py")
+if os.path.exists(sched_path):
+    print("patching OmniGen scheduler for transformers compatibility...", flush=True)
+    with open(sched_path, "r") as f:
+        code = f.read()
+    code = code.replace(
+        "from transformers.cache_utils import Cache, DynamicCache, OffloadedCache",
+        "from transformers.cache_utils import Cache, DynamicCache\nOffloadedCache = DynamicCache"
+    )
+    with open(sched_path, "w") as f:
+        f.write(code)
 
-if not installed or not os.path.exists("/kaggle/temp/OmniGen"):
-    print("cloning OmniGen repository directly as safeguard...", flush=True)
-    subprocess.run(["git", "clone", "--depth=1", "https://github.com/VectorSpaceLab/OmniGen.git", "/kaggle/temp/OmniGen"], check=False)
-
-print("OmniGen setup completed.", flush=True)
+subprocess.run([sys.executable, "-m", "pip", "install", "--no-deps", "-q", "-e", OMNIGEN_DIR], check=False)
+print("OmniGen setup completed successfully.", flush=True)
 '''
 
 CELL_3_OMNIGEN_SERVE = r'''
@@ -1428,8 +1429,17 @@ import base64, io, gc
 import torch
 from PIL import Image
 
-if os.path.exists("/kaggle/temp/OmniGen") and "/kaggle/temp/OmniGen" not in sys.path:
-    sys.path.insert(0, "/kaggle/temp/OmniGen")
+# Ensure OffloadedCache alias exists in transformers before any imports
+try:
+    import transformers.cache_utils
+    if not hasattr(transformers.cache_utils, "OffloadedCache"):
+        transformers.cache_utils.OffloadedCache = getattr(transformers.cache_utils, "DynamicCache", object)
+except Exception:
+    pass
+
+OMNIGEN_DIR = "/kaggle/temp/OmniGen"
+if os.path.exists(OMNIGEN_DIR) and OMNIGEN_DIR not in sys.path:
+    sys.path.insert(0, OMNIGEN_DIR)
 
 from OmniGen import OmniGenPipeline
 
