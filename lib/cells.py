@@ -16,6 +16,8 @@ print("project:", "__PROJECT_NAME__")
 print("python:", sys.version.split()[0])
 print("platform:", platform.platform())
 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 for p in ("/kaggle/temp", "/kaggle/working"):
     os.makedirs(p, exist_ok=True)
     st = os.statvfs(p)
@@ -1420,12 +1422,20 @@ if os.path.exists(sched_path):
 
 trans_path = os.path.join(OMNIGEN_DIR, "OmniGen", "transformer.py")
 if os.path.exists(trans_path):
-    print("patching OmniGen transformer for position_embeddings...", flush=True)
+    print("patching OmniGen transformer for transformers compatibility...", flush=True)
     with open(trans_path, "r") as f:
         tcode = f.read()
     tcode = tcode.replace(
         "layer_outputs = decoder_layer(\n                    hidden_states,\n                    attention_mask=attention_mask,\n                    position_ids=position_ids,\n                    past_key_value=past_key_values,\n                    output_attentions=output_attentions,\n                    use_cache=use_cache,\n                    cache_position=cache_position,\n                )",
-        "pos_emb = self.rotary_emb(hidden_states, position_ids=position_ids) if hasattr(self, 'rotary_emb') else None\n                layer_outputs = decoder_layer(\n                    hidden_states,\n                    attention_mask=attention_mask,\n                    position_ids=position_ids,\n                    past_key_value=past_key_values,\n                    output_attentions=output_attentions,\n                    use_cache=use_cache,\n                    cache_position=cache_position,\n                    position_embeddings=pos_emb,\n                )"
+        "pos_emb = self.rotary_emb(hidden_states, position_ids=position_ids) if hasattr(self, 'rotary_emb') else None\n                layer_outputs = decoder_layer(\n                    hidden_states,\n                    attention_mask=attention_mask,\n                    position_ids=position_ids,\n                    past_key_values=past_key_values,\n                    past_key_value=past_key_values,\n                    output_attentions=output_attentions,\n                    use_cache=use_cache,\n                    cache_position=cache_position,\n                    position_embeddings=pos_emb,\n                )"
+    )
+    tcode = tcode.replace(
+        "next_decoder_cache = layer_outputs[2 if output_attentions else 1]",
+        "next_decoder_cache = layer_outputs[2 if output_attentions else 1] if (isinstance(layer_outputs, tuple) and len(layer_outputs) > (2 if output_attentions else 1)) else past_key_values"
+    )
+    tcode = tcode.replace(
+        "hidden_states = layer_outputs[0]",
+        "hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs"
     )
     with open(trans_path, "w") as f:
         f.write(tcode)
@@ -1466,7 +1476,7 @@ try:
 except Exception:
     pass
 
-# Patch Phi3Attention.forward if position_embeddings is None
+# Patch Phi3Attention.forward and Phi3DecoderLayer.forward for transformers 4.48+
 try:
     import transformers.models.phi3.modeling_phi3 as phi3_mod
     orig_attn_forward = phi3_mod.Phi3Attention.forward
@@ -1483,8 +1493,28 @@ try:
             position_embeddings = self.rotary_emb(hidden_states, position_ids=position_ids)
         return orig_attn_forward(self, hidden_states, position_embeddings, *args, **kwargs)
     phi3_mod.Phi3Attention.forward = patched_attn_forward
+
+    orig_decoder_forward = phi3_mod.Phi3DecoderLayer.forward
+    def patched_decoder_forward(self, hidden_states, *args, **kwargs):
+        if "past_key_value" in kwargs and "past_key_values" not in kwargs:
+            kwargs["past_key_values"] = kwargs.pop("past_key_value")
+        pkv = kwargs.get("past_key_values")
+        use_cache = kwargs.get("use_cache", False)
+        output_attentions = kwargs.get("output_attentions", False)
+
+        out = orig_decoder_forward(self, hidden_states, *args, **kwargs)
+        if not isinstance(out, tuple):
+            if output_attentions and use_cache:
+                return (out, None, pkv)
+            elif use_cache:
+                return (out, pkv)
+            elif output_attentions:
+                return (out, None)
+            return (out,)
+        return out
+    phi3_mod.Phi3DecoderLayer.forward = patched_decoder_forward
 except Exception as e:
-    print("attn patch note:", e, flush=True)
+    print("phi3 patch note:", e, flush=True)
 
 OMNIGEN_DIR = "/kaggle/temp/OmniGen"
 if os.path.exists(OMNIGEN_DIR) and OMNIGEN_DIR not in sys.path:
@@ -1520,6 +1550,10 @@ if not os.path.exists(CF):
 # ---- load pipeline ----
 print(f"Loading OmniGen from {MODEL_REPO}...", flush=True)
 pipe = OmniGenPipeline.from_pretrained(MODEL_REPO)
+if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_slicing"):
+    pipe.vae.enable_slicing()
+if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
+    pipe.vae.enable_tiling()
 print("OmniGen pipeline loaded and ready on GPU!", flush=True)
 
 # ---- Control Server on CTL_PORT (port 8081) ----
@@ -1841,6 +1875,11 @@ class ServerHandler(http.server.BaseHTTPRequestHandler):
             guidance_scale = float(req.get("guidance_scale", 3.0))
             img_guidance_scale = float(req.get("img_guidance_scale", 1.6))
             seed = int(req.get("seed", 0)) if req.get("seed") is not None else None
+            max_input_image_size = int(req.get("max_input_image_size", 512))
+            separate_cfg_infer = bool(req.get("separate_cfg_infer", True))
+            offload_model = bool(req.get("offload_model", True if local_paths else False))
+            use_kv_cache = bool(req.get("use_kv_cache", True))
+            offload_kv_cache = bool(req.get("offload_kv_cache", True))
 
             # Process input images if provided
             raw_input_images = req.get("input_images", [])
@@ -1862,20 +1901,37 @@ class ServerHandler(http.server.BaseHTTPRequestHandler):
                 elif os.path.exists(item):
                     local_paths.append(item)
 
-            print(f"Generating OmniGen ({width}x{height}, {steps} steps, {len(local_paths)} ref images)...", flush=True)
+            print(f"Generating OmniGen ({width}x{height}, {steps} steps, {len(local_paths)} ref images, offload={offload_model}, max_input={max_input_image_size})...", flush=True)
             t0 = time.time()
-            with GEN_LOCK:
-                out = pipe(
-                    prompt=prompt,
-                    input_images=local_paths if local_paths else None,
-                    height=height,
-                    width=width,
-                    num_inference_steps=steps,
-                    guidance_scale=guidance_scale,
-                    img_guidance_scale=img_guidance_scale,
-                    seed=seed,
-                )
-                img = out[0]
+            try:
+                with GEN_LOCK:
+                    out = pipe(
+                        prompt=prompt,
+                        input_images=local_paths if local_paths else None,
+                        height=height,
+                        width=width,
+                        num_inference_steps=steps,
+                        guidance_scale=guidance_scale,
+                        img_guidance_scale=img_guidance_scale,
+                        max_input_image_size=max_input_image_size,
+                        separate_cfg_infer=separate_cfg_infer,
+                        offload_model=offload_model,
+                        use_kv_cache=use_kv_cache,
+                        offload_kv_cache=offload_kv_cache,
+                        seed=seed,
+                    )
+                    img = out[0]
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                return self._send_json(500, {"error": str(e)})
+            finally:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             elapsed = round(time.time() - t0, 2)
             print(f"Generation done in {elapsed}s", flush=True)
 
