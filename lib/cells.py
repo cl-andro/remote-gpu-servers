@@ -1440,20 +1440,17 @@ except Exception:
 # Patch longrope parameter validation in transformers
 try:
     import transformers.modeling_rope_utils as rope_utils
+    if hasattr(rope_utils, "RotaryEmbeddingConfigMixin"):
+        rope_utils.RotaryEmbeddingConfigMixin.validate_rope = lambda self: None
+        orig_val = getattr(rope_utils.RotaryEmbeddingConfigMixin, "_validate_longrope_rope_parameters", None)
+        if orig_val:
+            def patched_val(self, rope_parameters, ignore_keys=None):
+                if "original_max_position_embeddings" not in rope_parameters:
+                    rope_parameters["original_max_position_embeddings"] = getattr(self, "max_position_embeddings", 4096)
+                return orig_val(self, rope_parameters, ignore_keys)
+            rope_utils.RotaryEmbeddingConfigMixin._validate_longrope_rope_parameters = patched_val
     if hasattr(rope_utils, "RoPEScalingValidator"):
-        orig_val = rope_utils.RoPEScalingValidator._validate_longrope_rope_parameters
-        def patched_val(self, rope_parameters, ignore_keys=None):
-            if "original_max_position_embeddings" not in rope_parameters:
-                rope_parameters["original_max_position_embeddings"] = getattr(self, "max_position_embeddings", 4096)
-            return orig_val(self, rope_parameters, ignore_keys)
-        rope_utils.RoPEScalingValidator._validate_longrope_rope_parameters = patched_val
-    if hasattr(rope_utils, "_validate_longrope_rope_parameters"):
-        orig_fn = rope_utils._validate_longrope_rope_parameters
-        def patched_fn(self, rope_parameters, ignore_keys=None):
-            if "original_max_position_embeddings" not in rope_parameters:
-                rope_parameters["original_max_position_embeddings"] = getattr(self, "max_position_embeddings", 4096)
-            return orig_fn(self, rope_parameters, ignore_keys)
-        rope_utils._validate_longrope_rope_parameters = patched_fn
+        rope_utils.RoPEScalingValidator.validate_rope = lambda self: None
 except Exception:
     pass
 
