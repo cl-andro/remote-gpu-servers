@@ -1581,7 +1581,8 @@ class CtlHandler(http.server.BaseHTTPRequestHandler):
         elif self.path.startswith("/stop/" + STOP_TOKEN):
             STOP_REQUESTED.set()
             self._send(200, {"ok": True, "message": "shutdown requested"})
-            print("STOP_REQUESTED received via control tunnel", flush=True)
+            print("STOP_REQUESTED received via control tunnel -> exiting immediately", flush=True)
+            threading.Thread(target=lambda: (time.sleep(1), os._exit(0)), daemon=True).start()
         else:
             self._send(404, {"ok": False, "error": "not found"})
 
@@ -1850,6 +1851,22 @@ class ServerHandler(http.server.BaseHTTPRequestHandler):
                     "type": "image-generation"
                 }]
             })
+        elif path in ("/last_image", "/v1/images/last"):
+            found = False
+            for p in ("/kaggle/working/last_image.png", os.path.join(WORK, "last_image.png")):
+                if os.path.exists(p):
+                    with open(p, "rb") as f:
+                        data = f.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/png")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(data)
+                    found = True
+                    break
+            if not found:
+                self._send_json(404, {"error": "No image generated yet"})
         else:
             self._send_json(404, {"error": f"Path {path} not found"})
 
@@ -1927,6 +1944,11 @@ class ServerHandler(http.server.BaseHTTPRequestHandler):
                         seed=seed,
                     )
                     img = out[0]
+                    try:
+                        img.save("/kaggle/working/last_image.png")
+                        img.save(os.path.join(WORK, "last_image.png"))
+                    except Exception as e:
+                        print("save image warning:", e, flush=True)
             except Exception as e:
                 import traceback
                 traceback.print_exc()

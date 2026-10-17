@@ -313,14 +313,41 @@ def cmd_gen(a) -> None:
         headers={"Content-Type": "application/json"},
         method="POST"
     )
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        res = json.load(resp)
-        b64_data = res["data"][0]["b64_json"]
-        img_bytes = base64.b64decode(b64_data)
-        out_path = a.out or "output.png"
-        with open(out_path, "wb") as f:
-            f.write(img_bytes)
-        print(f"{GREEN}saved image{RESET} ({len(img_bytes)} bytes) to: {out_path}")
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            res = json.load(resp)
+            b64_data = res["data"][0]["b64_json"]
+            img_bytes = base64.b64decode(b64_data)
+            out_path = a.out or "output.png"
+            with open(out_path, "wb") as f:
+                f.write(img_bytes)
+            print(f"{GREEN}saved image{RESET} ({len(img_bytes)} bytes) to: {out_path}")
+            return
+    except urllib.error.HTTPError as e:
+        if e.code == 524:
+            print(f"{YELLOW}Cloudflare connection timed out (524), but generation is running on Kaggle GPU!{RESET}")
+            print(f"{CYAN}Polling for completed image from Kaggle...{RESET}")
+            import time
+            out_path = a.out or "output.png"
+            for poll_idx in range(60):
+                time.sleep(10)
+                try:
+                    poll_req = authed_request(f"{url}/last_image", headers={}, method="GET")
+                    with urllib.request.urlopen(poll_req, timeout=30) as p_resp:
+                        if p_resp.status == 200:
+                            img_bytes = p_resp.read()
+                            if len(img_bytes) > 2000:
+                                with open(out_path, "wb") as f:
+                                    f.write(img_bytes)
+                                print(f"{GREEN}saved image{RESET} ({len(img_bytes)} bytes) to: {out_path}")
+                                return
+                except Exception:
+                    pass
+                if poll_idx % 3 == 0:
+                    print(f"{DIM}still generating on GPU... ({poll_idx * 10 + 10}s elapsed){RESET}")
+            print(f"{RED}Timed out waiting for generated image{RESET}", file=sys.stderr)
+            sys.exit(1)
+        raise
 
 
 def cmd_raw(a) -> None:
