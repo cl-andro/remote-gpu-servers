@@ -1387,9 +1387,10 @@ CELL_2_OMNIGEN_DEPS = r'''
 import subprocess, sys, os
 
 pkgs = [
+    "transformers==4.45.2",
+    "tokenizers>=0.20.0,<0.21",
     "accelerate>=0.33.0",
     "diffusers>=0.30.0",
-    "transformers>=4.45.0",
     "sentencepiece",
     "timm",
     "peft>=0.9.0",
@@ -1398,7 +1399,7 @@ pkgs = [
     "torchvision",
 ]
 print("installing dependencies:", " ".join(pkgs), flush=True)
-subprocess.run([sys.executable, "-m", "pip", "install", "-q"] + pkgs, check=True)
+subprocess.run([sys.executable, "-m", "pip", "install", "-U", "-q"] + pkgs, check=True)
 
 OMNIGEN_DIR = "/kaggle/temp/OmniGen"
 if not os.path.exists(OMNIGEN_DIR):
@@ -1434,6 +1435,18 @@ try:
     import transformers.cache_utils
     if not hasattr(transformers.cache_utils, "OffloadedCache"):
         transformers.cache_utils.OffloadedCache = getattr(transformers.cache_utils, "DynamicCache", object)
+except Exception:
+    pass
+
+# Patch longrope parameter validation if running on newer transformers
+try:
+    import transformers.modeling_rope_utils as rope_utils
+    orig_check = rope_utils._check_received_keys
+    def patched_check(rope_type, received_keys, required_keys, optional_keys, ignore_keys=None):
+        if "original_max_position_embeddings" in required_keys:
+            required_keys = set(required_keys) - {"original_max_position_embeddings"}
+        return orig_check(rope_type, received_keys, required_keys, optional_keys, ignore_keys=ignore_keys)
+    rope_utils._check_received_keys = patched_check
 except Exception:
     pass
 
