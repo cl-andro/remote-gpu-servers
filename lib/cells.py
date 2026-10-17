@@ -1417,6 +1417,10 @@ if os.path.exists(sched_path):
         "from transformers.cache_utils import Cache, DynamicCache, OffloadedCache",
         "from transformers.cache_utils import Cache, DynamicCache\nOffloadedCache = DynamicCache"
     )
+    code = code.replace(
+        "super().__init__()\n        self.original_device = []",
+        "super().__init__()\n        self.key_cache = []\n        self.value_cache = []\n        self._seen_tokens = 0\n        self.original_device = []"
+    )
     with open(sched_path, "w") as f:
         f.write(code)
 
@@ -1901,7 +1905,7 @@ class ServerHandler(http.server.BaseHTTPRequestHandler):
                     local_paths.append(item)
 
             user_offload = req.get("offload_model")
-            offload_model = bool(user_offload) if user_offload is not None else bool(local_paths)
+            offload_model = bool(user_offload) if user_offload is not None else False
 
             print(f"Generating OmniGen ({width}x{height}, {steps} steps, {len(local_paths)} ref images, offload={offload_model}, max_input={max_input_image_size})...", flush=True)
             t0 = time.time()

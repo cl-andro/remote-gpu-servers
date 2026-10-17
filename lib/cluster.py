@@ -263,6 +263,7 @@ def cmd_gen(a) -> None:
         "size": a.size or "1024x1024",
         "n": 1,
         "response_format": "b64_json",
+        "use_kv_cache": False,
     }
     if getattr(a, "steps", None) is not None:
         payload["steps"] = int(a.steps)
