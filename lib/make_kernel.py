@@ -23,7 +23,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from cells import CELLS, FLUX_CELLS, SDXL_CELLS, OMNIGEN_CELLS, JANUS_CELLS, Z_IMAGE_CELLS  # noqa: E402
+from cells import CELLS, FLUX_CELLS, FLUX_FACE_CELLS, SDXL_CELLS, OMNIGEN_CELLS, JANUS_CELLS, Z_IMAGE_CELLS  # noqa: E402
 
 # Placeholders whose value is not allowed to be empty.
 REQUIRED_LLM = (
@@ -48,6 +48,13 @@ DEFAULTS_FLUX = {
     "__DEFAULT_STEPS__": "4",
     "__DEFAULT_WIDTH__": "1024",
     "__DEFAULT_HEIGHT__": "1024",
+}
+
+REQUIRED_FLUX_FACE = REQUIRED_FLUX
+DEFAULTS_FLUX_FACE = {
+    "__DEFAULT_STEPS__": "4",
+    "__DEFAULT_WIDTH__": "1024",
+    "__DEFAULT_HEIGHT__": "576",
 }
 
 REQUIRED_SDXL = (
@@ -131,6 +138,9 @@ def load_cfg(project_dir: str) -> dict:
     if model_type == "flux":
         defaults = dict(DEFAULTS_FLUX)
         required = REQUIRED_FLUX
+    elif model_type in ("flux-face", "flux_face"):
+        defaults = dict(DEFAULTS_FLUX_FACE)
+        required = REQUIRED_FLUX_FACE
     elif model_type == "sdxl":
         defaults = dict(DEFAULTS_SDXL)
         required = REQUIRED_SDXL
@@ -188,6 +198,8 @@ def main() -> None:
     model_type = cfg.get("__MODEL_TYPE__", "llm")
     if model_type == "flux":
         template_cells = FLUX_CELLS
+    elif model_type in ("flux-face", "flux_face"):
+        template_cells = FLUX_FACE_CELLS
     elif model_type == "sdxl":
         template_cells = SDXL_CELLS
     elif model_type == "omnigen":

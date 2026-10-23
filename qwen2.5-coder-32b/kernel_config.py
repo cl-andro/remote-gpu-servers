@@ -4,9 +4,9 @@ The shared generator (../lib/make_kernel.py) reads `CFG` and writes
 """
 
 CFG = {
-    "__PROJECT_NAME__": "Qwen2.5-Coder-32B-Instruct",
-    "__MODEL_REPO__": "unsloth/Qwen2.5-Coder-32B-Instruct-GGUF",
-    "__MODEL_FILE__": "Qwen2.5-Coder-32B-Instruct-Q4_K_M.gguf",
+    "__PROJECT_NAME__": "Qwen2.5-Coder-32B-Instruct-Abliterated",
+    "__MODEL_REPO__": "bartowski/Qwen2.5-Coder-32B-Instruct-abliterated-GGUF",
+    "__MODEL_FILE__": "Qwen2.5-Coder-32B-Instruct-abliterated-Q4_K_M.gguf",
     "__MODEL_SIZE_GB__": "18.49",
     "__MODEL_ALIAS__": "qwen2.5-coder-32b",
     "__LLAMA_BUILD__": "b11636",

@@ -17,6 +17,8 @@ kaggle.json
 */stop_url.txt
 */output/
 */.cluster/
+.opencode/
+*/.opencode/
 *.png
 *.jpg
 *.jpeg
@@ -72,3 +74,4 @@ temp/
 scratch/
 PROGRESS_REPORT.md
 input-images/
+prompt/

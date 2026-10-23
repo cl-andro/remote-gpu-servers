@@ -1,6 +1,6 @@
 {
-  "id": "zkmohammad/qwen2.5-coder-32b-server",
-  "title": "qwen2.5-coder-32b-server",
+  "id": "zkmohammad/qwen2-5-coder-32b-server",
+  "title": "qwen2-5-coder-32b-server",
   "code_file": "notebook.ipynb",
   "language": "python",
   "kernel_type": "notebook",

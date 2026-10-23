@@ -2963,3 +2963,613 @@ print("Stop from PC   : ctr.sh stop   (uses the control tunnel above)")
 '''
 
 Z_IMAGE_CELLS = [CELL_1_ENV, CELL_2_ZIMAGE_DEPS, CELL_3_ZIMAGE_SERVE, CELL_5_KEEPALIVE]
+
+
+CELL_2_FLUX_FACE_DEPS = r'''
+# --- Cell 2: install dependencies for FLUX GGUF + InsightFace Face Swapper ---
+import subprocess, sys, os
+
+pkgs = [
+    "diffusers>=0.30.0",
+    "transformers>=4.44.0",
+    "accelerate>=0.33.0",
+    "sentencepiece",
+    "gguf>=0.10.0",
+    "protobuf",
+    "opencv-python-headless",
+    "insightface",
+    "onnxruntime-gpu",
+]
+print("installing packages:", " ".join(pkgs), flush=True)
+subprocess.run([sys.executable, "-m", "pip", "install", "-q"] + pkgs, check=True)
+print("packages installed successfully.", flush=True)
+
+# Pre-download inswapper_128.onnx into /kaggle/temp/models
+MODEL_DIR = "/kaggle/temp/models"
+os.makedirs(MODEL_DIR, exist_ok=True)
+inswapper_path = os.path.join(MODEL_DIR, "inswapper_128.onnx")
+if not os.path.exists(inswapper_path) or os.path.getsize(inswapper_path) < 1000000:
+    print("Downloading inswapper_128.onnx model...", flush=True)
+    import urllib.request
+    url = "https://huggingface.co/ezioruan/inswapper_128.onnx/resolve/main/inswapper_128.onnx"
+    urllib.request.urlretrieve(url, inswapper_path)
+    print(f"inswapper_128.onnx ready ({os.path.getsize(inswapper_path) / (1024*1024):.1f} MB)", flush=True)
+'''
+
+CELL_4_FLUX_FACE_SERVE = r'''
+# --- Cell 4: load FLUX + InsightFace + start server + open tunnels ----------
+import os, re, subprocess, time, urllib.request, json, threading, http.server
+import base64, io, gc
+import torch
+import numpy as np
+import cv2
+from PIL import Image
+from diffusers import FluxPipeline, FluxTransformer2DModel, GGUFQuantizationConfig
+import insightface
+from insightface.app import FaceAnalysis
+
+PORT = int("__PORT__")
+CTL_PORT = int("__CTL_PORT__")
+DEFAULT_STEPS = int("__DEFAULT_STEPS__" or "4")
+DEFAULT_WIDTH = int("__DEFAULT_WIDTH__" or "1024")
+DEFAULT_HEIGHT = int("__DEFAULT_HEIGHT__" or "576")
+
+STOP_REQUESTED = threading.Event()
+GEN_LOCK = threading.Lock()
+
+WORK = "/kaggle/temp/run"
+os.makedirs(WORK, exist_ok=True)
+CF_LOG = os.path.join(WORK, "cloudflared.log")
+CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
+
+# ---- cloudflared binary ----
+CF = "/kaggle/temp/cloudflared"
+if not os.path.exists(CF):
+    subprocess.run(["curl", "-sL", "-o", CF,
+                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
+                   check=True)
+    os.chmod(CF, 0o755)
+
+# ---- load FLUX pipeline ----
+model_path = os.path.join("/kaggle/temp/models", "__MODEL_FILE__")
+base_dir = "/kaggle/temp/base_pipe"
+
+# Ensure transformer/config.json exists locally so from_single_file never hits gated repo
+trans_cfg_dir = os.path.join(base_dir, "transformer")
+os.makedirs(trans_cfg_dir, exist_ok=True)
+trans_cfg_file = os.path.join(trans_cfg_dir, "config.json")
+if not os.path.exists(trans_cfg_file):
+    print("Fetching transformer config.json from ungated mirror...", flush=True)
+    try:
+        url = "https://huggingface.co/__BASE_REPO__/raw/main/transformer/config.json"
+        with urllib.request.urlopen(url) as r:
+            with open(trans_cfg_file, "wb") as f:
+                f.write(r.read())
+    except Exception as e:
+        print("Warning: could not fetch config.json directly:", e, flush=True)
+
+sched_dir = os.path.join(base_dir, "scheduler")
+sched_cfg_file = os.path.join(sched_dir, "config.json")
+sched_target = os.path.join(sched_dir, "scheduler_config.json")
+if os.path.exists(sched_cfg_file) and not os.path.exists(sched_target):
+    import shutil
+    shutil.copyfile(sched_cfg_file, sched_target)
+
+print("Loading GGUF transformer with float16 compute...", flush=True)
+transformer = FluxTransformer2DModel.from_single_file(
+    model_path,
+    config=trans_cfg_dir,
+    quantization_config=GGUFQuantizationConfig(compute_dtype=torch.float16),
+    torch_dtype=torch.float16,
+)
+
+print("Loading FluxPipeline...", flush=True)
+from diffusers import FlowMatchEulerDiscreteScheduler
+scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(sched_dir)
+pipe = FluxPipeline.from_pretrained(
+    base_dir,
+    transformer=transformer,
+    scheduler=scheduler,
+    torch_dtype=torch.float16,
+)
+pipe.enable_model_cpu_offload()
+print("FLUX pipeline loaded and ready on GPU!", flush=True)
+
+# ---- load InsightFace Face Swapper ----
+print("Loading InsightFace buffalo_l...", flush=True)
+face_app = FaceAnalysis(name="buffalo_l", root="/kaggle/temp/insightface", providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+face_app.prepare(ctx_id=0, det_size=(640, 640))
+
+inswapper_path = os.path.join("/kaggle/temp/models", "inswapper_128.onnx")
+face_swapper = insightface.model_zoo.get_model(inswapper_path, providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+print("InsightFace Face Swapper loaded and ready!", flush=True)
+
+# ---- Helper functions for face processing ----
+def parse_image_input(item):
+    if not item: return None
+    if isinstance(item, str):
+        try:
+            if item.startswith("data:"):
+                header, b64 = item.split(",", 1)
+                img_bytes = base64.b64decode(b64)
+            elif item.startswith("http://") or item.startswith("https://"):
+                req = urllib.request.Request(item, headers={"User-Agent": "curl/8.5.0"})
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    img_bytes = r.read()
+            elif os.path.exists(item):
+                with open(item, "rb") as f:
+                    img_bytes = f.read()
+            else:
+                return None
+            nparr = np.frombuffer(img_bytes, np.uint8)
+            return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        except Exception as e:
+            print("Error parsing image input:", e, flush=True)
+            return None
+    return None
+
+def perform_face_swaps(target_pil_img, face_left=None, face_right=None, face_images=None):
+    try:
+        target_cv = cv2.cvtColor(np.array(target_pil_img), cv2.COLOR_RGB2BGR)
+        target_faces = face_app.get(target_cv)
+        if not target_faces:
+            print("[FACE] No faces detected in generated target image to swap.", flush=True)
+            return target_pil_img
+        
+        target_faces = sorted(target_faces, key=lambda f: f.bbox[0])
+        print(f"[FACE] Detected {len(target_faces)} faces in target image.", flush=True)
+        result_cv = target_cv.copy()
+        
+        # 1. Left face swap
+        left_cv = parse_image_input(face_left)
+        if left_cv is not None and len(target_faces) >= 1:
+            src_faces = face_app.get(left_cv)
+            if src_faces:
+                src_face = max(src_faces, key=lambda f: (f.bbox[2]-f.bbox[0])*(f.bbox[3]-f.bbox[1]))
+                result_cv = face_swapper.get(result_cv, target_faces[0], src_face, paste_back=True)
+                print("[FACE] Swapped face_left onto target face 0.", flush=True)
+            else:
+                print("[FACE] Warning: No face detected in face_left source image.", flush=True)
+
+        # 2. Right face swap
+        right_cv = parse_image_input(face_right)
+        if right_cv is not None and len(target_faces) >= 2:
+            src_faces = face_app.get(right_cv)
+            if src_faces:
+                src_face = max(src_faces, key=lambda f: (f.bbox[2]-f.bbox[0])*(f.bbox[3]-f.bbox[1]))
+                result_cv = face_swapper.get(result_cv, target_faces[-1], src_face, paste_back=True)
+                print(f"[FACE] Swapped face_right onto target face {len(target_faces)-1}.", flush=True)
+            else:
+                print("[FACE] Warning: No face detected in face_right source image.", flush=True)
+
+        # 3. Arbitrary ordered face_images list
+        if face_images and isinstance(face_images, list):
+            for idx, item in enumerate(face_images):
+                if idx >= len(target_faces): break
+                src_cv = parse_image_input(item)
+                if src_cv is not None:
+                    src_faces = face_app.get(src_cv)
+                    if src_faces:
+                        src_face = max(src_faces, key=lambda f: (f.bbox[2]-f.bbox[0])*(f.bbox[3]-f.bbox[1]))
+                        result_cv = face_swapper.get(result_cv, target_faces[idx], src_face, paste_back=True)
+                        print(f"[FACE] Swapped face_images[{idx}] onto target face {idx}.", flush=True)
+
+        return Image.fromarray(cv2.cvtColor(result_cv, cv2.COLOR_BGR2RGB))
+    except Exception as e:
+        print("[FACE] Face swap error:", e, flush=True)
+        return target_pil_img
+
+# ---- Control Server on CTL_PORT (port 8081) ----
+STOP_TOKEN = os.environ.get("CLUSTER_STOP_TOKEN") or os.urandom(8).hex()
+
+class CtlHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def _send(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path.rstrip("/") in ("", "/health"):
+            self._send(200, {"ok": True, "status": "up",
+                             "stopping": STOP_REQUESTED.is_set(),
+                             "model": "__MODEL_FILE__"})
+        elif self.path.startswith("/stop/" + STOP_TOKEN):
+            STOP_REQUESTED.set()
+            self._send(200, {"ok": True, "message": "shutdown requested"})
+            print("STOP_REQUESTED received via control tunnel", flush=True)
+            import threading
+            threading.Thread(target=lambda: (time.sleep(1), os._exit(0))).start()
+        else:
+            self._send(404, {"ok": False, "error": "not found"})
+
+    def do_POST(self):
+        self.do_GET()
+
+ctl = http.server.ThreadingHTTPServer(("127.0.0.1", CTL_PORT), CtlHandler)
+threading.Thread(target=ctl.serve_forever, daemon=True).start()
+
+# ---- Image Generation Server on PORT (port 8080) ----
+HTML_PAGE = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FLUX.1-schnell + Face Swapper Studio</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  body { background: #0f1117; color: #e1e4ea; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 24px 16px; }
+  .card { background: #1a1d27; border: 1px solid #2d3139; border-radius: 12px; width: 100%; max-width: 900px; padding: 24px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); margin-bottom: 24px; }
+  h1 { font-size: 1.6rem; color: #fff; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+  .badge { font-size: 0.75rem; background: #059669; color: #fff; padding: 3px 8px; border-radius: 6px; font-weight: 600; }
+  p.subtitle { color: #9ca3af; font-size: 0.9rem; margin-bottom: 20px; }
+  label { display: block; font-size: 0.85rem; font-weight: 600; color: #d1d5db; margin-bottom: 6px; }
+  textarea { width: 100%; background: #0f1117; border: 1px solid #374151; border-radius: 8px; color: #fff; padding: 12px; font-size: 0.95rem; min-height: 90px; resize: vertical; margin-bottom: 16px; }
+  textarea:focus { outline: none; border-color: #3b82f6; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  .row-faces { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  .face-box { background: #11131a; border: 1px dashed #374151; border-radius: 8px; padding: 12px; }
+  select, input[type=file], input[type=text] { width: 100%; background: #0f1117; border: 1px solid #374151; border-radius: 8px; color: #fff; padding: 10px; font-size: 0.9rem; }
+  button { width: 100%; background: #2563eb; color: #fff; border: none; padding: 12px 20px; font-size: 1rem; font-weight: 600; border-radius: 8px; cursor: pointer; transition: background 0.2s; }
+  button:hover { background: #1d4ed8; }
+  button:disabled { background: #4b5563; cursor: not-allowed; }
+  #status { margin-top: 16px; font-size: 0.9rem; color: #93c5fd; text-align: center; }
+  #preview { margin-top: 24px; text-align: center; }
+  #preview img { max-width: 100%; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
+  .download-btn { margin-top: 12px; display: inline-block; background: #10b981; color: #fff; text-decoration: none; padding: 8px 16px; border-radius: 6px; font-size: 0.9rem; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>FLUX.1-schnell + Face Swapper <span class="badge">ONLINE</span></h1>
+  <p class="subtitle">Generate realistic thumbnail scenes in 4 steps (~8s) and automatically swap reference faces with 100% fidelity</p>
+  
+  <label for="prompt">Scene Prompt</label>
+  <textarea id="prompt" placeholder="A dramatic YouTube documentary thumbnail about Bangladesh military ambition, high-tech war room, tactical radar screen, stealth fighter jets, cinematic news lighting..."></textarea>
+  
+  <div class="row-faces">
+    <div class="face-box">
+      <label>Face 1 (Left / Foreground Person)</label>
+      <input type="file" id="face_left" accept="image/*">
+    </div>
+    <div class="face-box">
+      <label>Face 2 (Right / Background Person)</label>
+      <input type="file" id="face_right" accept="image/*">
+    </div>
+  </div>
+
+  <div class="row">
+    <div>
+      <label for="size">Resolution</label>
+      <select id="size">
+        <option value="1024x576" selected>1024 × 576 (YouTube Thumbnail 16:9)</option>
+        <option value="1024x1024">1024 × 1024 (Square)</option>
+        <option value="768x768">768 × 768</option>
+      </select>
+    </div>
+    <div>
+      <label for="steps">Steps</label>
+      <select id="steps">
+        <option value="4" selected>4 steps (~8s - Best)</option>
+        <option value="3">3 steps</option>
+        <option value="2">2 steps</option>
+      </select>
+    </div>
+  </div>
+
+  <button id="gen-btn" onclick="generate()">Generate Thumbnail</button>
+  <div id="status"></div>
+  <div id="preview"></div>
+</div>
+
+<script>
+async function fileToB64(file) {
+  if (!file) return null;
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function generate() {
+  const btn = document.getElementById('gen-btn');
+  const status = document.getElementById('status');
+  const preview = document.getElementById('preview');
+  const prompt = document.getElementById('prompt').value.trim();
+  if (!prompt) return alert('Please enter a prompt');
+
+  btn.disabled = true;
+  status.textContent = 'Generating scene with FLUX and swapping faces on GPU...';
+  preview.innerHTML = '';
+
+  const f1 = document.getElementById('face_left').files[0];
+  const f2 = document.getElementById('face_right').files[0];
+
+  const payload = {
+    prompt: prompt,
+    size: document.getElementById('size').value,
+    steps: parseInt(document.getElementById('steps').value),
+    face_left: await fileToB64(f1),
+    face_right: await fileToB64(f2)
+  };
+
+  try {
+    const res = await fetch('/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.image_b64) {
+      status.textContent = 'Completed in ' + (data.elapsed_seconds || '') + 's!';
+      preview.innerHTML = '<img src="data:image/png;base64,' + data.image_b64 + '" /><br><a class="download-btn" href="data:image/png;base64,' + data.image_b64 + '" download="thumbnail.png">Download Thumbnail</a>';
+    } else {
+      status.textContent = 'Error: ' + (data.error || 'Unknown error');
+    }
+  } catch (e) {
+    status.textContent = 'Request failed: ' + e;
+  } finally {
+    btn.disabled = false;
+  }
+}
+</script>
+</body>
+</html>"""
+
+class ServerHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
+
+    def _check_auth(self):
+        user = os.environ.get("CLUSTER_AUTH_USER")
+        passwd = os.environ.get("CLUSTER_AUTH_PASS")
+        api_key = os.environ.get("CLUSTER_API_KEY")
+        if not user and not passwd and not api_key:
+            return True
+        auth_header = self.headers.get("Authorization", "")
+        if api_key and auth_header.startswith("Bearer ") and auth_header[7:].strip() == api_key:
+            return True
+        if user and passwd and auth_header.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(auth_header[6:].strip()).decode("utf-8")
+                u, p = decoded.split(":", 1)
+                if u == user and p == passwd:
+                    return True
+            except Exception:
+                pass
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="cluster"')
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"error": "Unauthorized"}\n')
+        return False
+
+    def _send_json(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.end_headers()
+
+    def do_GET(self):
+        if not self._check_auth(): return
+        path = self.path.split("?")[0].rstrip("/")
+        if path in ("", "/"):
+            body = HTML_PAGE.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path == "/health":
+            self._send_json(200, {
+                "status": "ok",
+                "model": "__MODEL_ALIAS__",
+                "architecture": "flux-face",
+                "device": "cuda" if torch.cuda.is_available() else "cpu"
+            })
+        elif path in ("/models", "/v1/models"):
+            self._send_json(200, {
+                "data": [{
+                    "id": "__MODEL_ALIAS__",
+                    "object": "model",
+                    "type": "image-generation"
+                }]
+            })
+        elif path in ("/last_image", "/v1/images/last"):
+            found = False
+            for p in ("/kaggle/working/last_image.png", os.path.join(WORK, "last_image.png")):
+                if os.path.exists(p):
+                    with open(p, "rb") as f:
+                        data = f.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/png")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(data)
+                    found = True
+                    break
+            if not found:
+                self._send_json(404, {"error": "No image generated yet"})
+        else:
+            self._send_json(404, {"error": f"Path {path} not found"})
+
+    def do_POST(self):
+        if not self._check_auth(): return
+        path = self.path.split("?")[0].rstrip("/")
+        content_len = int(self.headers.get("Content-Length", 0))
+        post_data = self.rfile.read(content_len) if content_len > 0 else b"{}"
+        try:
+            req = json.loads(post_data.decode("utf-8"))
+        except Exception:
+            return self._send_json(400, {"error": "Invalid JSON payload"})
+
+        if path in ("/v1/images/generations", "/generate"):
+            prompt = req.get("prompt", "")
+            if not prompt:
+                return self._send_json(400, {"error": "Missing prompt"})
+
+            size = req.get("size", "1024x576")
+            try:
+                width, height = map(int, size.lower().split("x"))
+            except Exception:
+                width, height = DEFAULT_WIDTH, DEFAULT_HEIGHT
+
+            steps = int(req.get("steps") or DEFAULT_STEPS)
+            steps = max(1, min(4, steps))
+            seed = req.get("seed")
+
+            gen = None
+            if seed is not None:
+                try:
+                    gen = torch.Generator("cpu").manual_seed(int(seed))
+                except Exception:
+                    pass
+
+            face_left = req.get("face_left")
+            face_right = req.get("face_right")
+            face_images = req.get("face_images")
+
+            t0 = time.time()
+            print(f"[GEN] FLUX Prompt: '{prompt[:80]}...' size={width}x{height} steps={steps}", flush=True)
+
+            with GEN_LOCK:
+                with torch.inference_mode():
+                    img = pipe(
+                        prompt=prompt,
+                        height=height,
+                        width=width,
+                        num_inference_steps=steps,
+                        guidance_scale=0.0,
+                        max_sequence_length=256,
+                        generator=gen,
+                    ).images[0]
+                torch.cuda.empty_cache()
+                gc.collect()
+
+                # Perform face swap if requested
+                if face_left or face_right or face_images:
+                    print("[FACE] Running InsightFace face replacement...", flush=True)
+                    t_swap = time.time()
+                    img = perform_face_swaps(img, face_left=face_left, face_right=face_right, face_images=face_images)
+                    print(f"[FACE] Swap finished in {round(time.time() - t_swap, 2)}s", flush=True)
+
+                try:
+                    img.save("/kaggle/working/last_image.png")
+                    img.save(os.path.join(WORK, "last_image.png"))
+                except Exception as e:
+                    print("save image warning:", e, flush=True)
+
+            elapsed = round(time.time() - t0, 2)
+            print(f"[GEN] Pipeline complete in {elapsed}s", flush=True)
+
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            b64_bytes = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+            if path == "/generate":
+                return self._send_json(200, {
+                    "image_b64": b64_bytes,
+                    "prompt": prompt,
+                    "width": width,
+                    "height": height,
+                    "steps": steps,
+                    "elapsed_seconds": elapsed
+                })
+            else:
+                return self._send_json(200, {
+                    "created": int(time.time()),
+                    "data": [
+                        {
+                            "b64_json": b64_bytes,
+                            "revised_prompt": prompt
+                        }
+                    ]
+                })
+        else:
+            self._send_json(404, {"error": f"POST {path} not supported"})
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), ServerHandler)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+print("FLUX Face Swapper server running on port", PORT, flush=True)
+
+# ---- publish both tunnels ----
+CF_TOKEN = "__CLOUDFLARE_TUNNEL_TOKEN__" or os.environ.get("CLOUDFLARE_TUNNEL_TOKEN", "")
+STATIC_URL = "__STATIC_URL__" or os.environ.get("CLUSTER_URL", "")
+
+def start_public_tunnel(url, log_path):
+    fh = open(log_path, "w")
+    if CF_TOKEN:
+        print("Starting named Cloudflare tunnel with token...", flush=True)
+        proc = subprocess.Popen([CF, "tunnel", "--no-autoupdate", "run", "--token", CF_TOKEN, "--url", url],
+                                stdout=fh, stderr=subprocess.STDOUT)
+        time.sleep(5)
+        if proc.poll() is not None:
+            fh.flush()
+            print("cloudflared failed to start! Log tail:", flush=True)
+            print(open(log_path).read()[-2000:], flush=True)
+            raise RuntimeError("named cloudflared tunnel exited immediately")
+        return STATIC_URL or "https://ai.883742.xyz"
+    else:
+        subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
+                         stdout=fh, stderr=subprocess.STDOUT)
+        for _ in range(60):
+            time.sleep(2)
+            m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open(log_path).read())
+            if m:
+                return m.group(0)
+        return None
+
+def start_tunnel(url, log_path):
+    fh = open(log_path, "w")
+    subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
+                     stdout=fh, stderr=subprocess.STDOUT)
+    for _ in range(60):
+        time.sleep(2)
+        m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open(log_path).read())
+        if m:
+            return m.group(0)
+    return None
+
+public_url = start_public_tunnel(f"http://127.0.0.1:{PORT}", CF_LOG)
+control_url = start_tunnel(f"http://127.0.0.1:{CTL_PORT}", CTL_LOG)
+
+if not public_url:
+    print("cloudflared log:", open(CF_LOG).read()[-2000:], flush=True)
+    raise RuntimeError("could not obtain a public tunnel URL")
+if not control_url:
+    print("control cloudflared log:", open(CTL_LOG).read()[-2000:], flush=True)
+    raise RuntimeError("could not obtain a control tunnel URL")
+
+with open("/kaggle/working/CONTROL_URL.txt", "w") as f:
+    f.write(public_url + "\n")
+with open("/kaggle/working/STOP_URL.txt", "w") as f:
+    f.write(control_url + "/stop/" + STOP_TOKEN + "\n")
+
+print("=" * 72)
+print("CONTROL_URL=" + public_url)
+print("STOP_URL=" + control_url + "/stop/" + STOP_TOKEN)
+print("MODEL=" + "__MODEL_FILE__")
+print("=" * 72)
+print(f"Web UI         : {public_url}")
+print(f"API endpoint   : {public_url}/v1/images/generations")
+print(f"Health         : {public_url}/health")
+print("Stop from PC   : ctr.sh stop   (uses the control tunnel above)")
+'''
+
+FLUX_FACE_CELLS = [CELL_1_ENV, CELL_2_FLUX_FACE_DEPS, CELL_3_FLUX_FETCH, CELL_4_FLUX_FACE_SERVE, CELL_5_KEEPALIVE]

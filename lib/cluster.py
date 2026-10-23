@@ -305,6 +305,37 @@ def cmd_gen(a) -> None:
                 encoded.append(p)
         payload["input_images"] = encoded
 
+    def _encode_img(p, max_dim=512):
+        if not p:
+            return None
+        if os.path.exists(p):
+            import mimetypes, io
+            from PIL import Image
+            mime = mimetypes.guess_type(p)[0] or "image/png"
+            try:
+                im = Image.open(p)
+                if max(im.size) > max_dim:
+                    im.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+                    buf = io.BytesIO()
+                    im.save(buf, format="PNG")
+                    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                    return f"data:image/png;base64,{b64}"
+                with open(p, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+                return f"data:{mime};base64,{b64}"
+            except Exception:
+                with open(p, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+                return f"data:{mime};base64,{b64}"
+        return p
+
+    if getattr(a, "face_left", None):
+        payload["face_left"] = _encode_img(a.face_left)
+    if getattr(a, "face_right", None):
+        payload["face_right"] = _encode_img(a.face_right)
+    if getattr(a, "face", None):
+        payload["face_images"] = [_encode_img(x) for x in a.face]
+
     print(f"{CYAN}generating image{RESET} ({payload['size']}) -> {a.out} ...")
     data = json.dumps(payload).encode()
     req = authed_request(
@@ -313,6 +344,16 @@ def cmd_gen(a) -> None:
         headers={"Content-Type": "application/json"},
         method="POST"
     )
+    initial_hash = None
+    try:
+        init_req = authed_request(f"{url}/last_image", headers={}, method="GET")
+        with urllib.request.urlopen(init_req, timeout=10) as p_init:
+            if p_init.status == 200:
+                import hashlib
+                initial_hash = hashlib.sha256(p_init.read()).hexdigest()
+    except Exception:
+        pass
+
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
             res = json.load(resp)
@@ -327,9 +368,9 @@ def cmd_gen(a) -> None:
         if e.code == 524:
             print(f"{YELLOW}Cloudflare connection timed out (524), but generation is running on Kaggle GPU!{RESET}")
             print(f"{CYAN}Polling for completed image from Kaggle...{RESET}")
-            import time
+            import time, hashlib
             out_path = a.out or "output.png"
-            for poll_idx in range(60):
+            for poll_idx in range(180):
                 time.sleep(10)
                 try:
                     poll_req = authed_request(f"{url}/last_image", headers={}, method="GET")
@@ -337,10 +378,12 @@ def cmd_gen(a) -> None:
                         if p_resp.status == 200:
                             img_bytes = p_resp.read()
                             if len(img_bytes) > 2000:
-                                with open(out_path, "wb") as f:
-                                    f.write(img_bytes)
-                                print(f"{GREEN}saved image{RESET} ({len(img_bytes)} bytes) to: {out_path}")
-                                return
+                                cur_hash = hashlib.sha256(img_bytes).hexdigest()
+                                if initial_hash is None or cur_hash != initial_hash:
+                                    with open(out_path, "wb") as f:
+                                        f.write(img_bytes)
+                                    print(f"{GREEN}saved image{RESET} ({len(img_bytes)} bytes) to: {out_path}")
+                                    return
                 except Exception:
                     pass
                 if poll_idx % 3 == 0:
@@ -472,6 +515,9 @@ def main() -> None:
     sp.add_argument("--img-guidance-scale", type=float, default=None, help="image guidance scale")
     sp.add_argument("--max-input-image-size", type=int, default=512, help="max reference image dimension (default 512)")
     sp.add_argument("--offload-model", action="store_true", default=None, help="enable layer offload to save VRAM")
+    sp.add_argument("--face-left", default=None, help="reference face image to swap onto the left/foreground person")
+    sp.add_argument("--face-right", default=None, help="reference face image to swap onto the right/background person")
+    sp.add_argument("--face", action="append", default=[], help="reference face image to swap onto detected faces")
     sp.add_argument("--out", "-o", default="output.png", help="output file path (default output.png)")
     sp.set_defaults(func=cmd_gen)
 

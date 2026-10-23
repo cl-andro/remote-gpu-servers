@@ -1,4 +1,4 @@
-# Qwen2.5-Coder-32B-Instruct — Flagship Open-Source Code Model
+# Qwen2.5-Coder-32B-Instruct (Abliterated / Uncensored)
 
 © 2026 CL-Andro / Mohammad Zaid — All Rights Reserved.
 
@@ -9,7 +9,7 @@ whole or in part — without prior written consent is strictly prohibited.
 
 ---
 
-[← back to Remote GPU Servers](../README.md) · the **heavyweight coding champion** of the collection.
+[← back to Remote GPU Servers](../README.md) · the **heavyweight uncensored coding & cybersecurity champion**.
 
 The model runs **on Kaggle** (GPU T4 x2). Your PC only sends HTTP requests to a
 public tunnel URL, so **nothing large is ever downloaded locally**.
@@ -17,18 +17,19 @@ public tunnel URL, so **nothing large is ever downloaded locally**.
 > **Prerequisite:** copy `.env.example` to `.env` in the repo root and paste your
 > Kaggle token there before running any `./ctr.sh` command.
 
-Qwen2.5-Coder-32B-Instruct is widely considered the strongest open-weights code model available, matching and often outperforming GPT-4o on HumanEval (92.7%) and SWE-bench Verified. Sharded across Kaggle's dual Tesla T4 GPUs (32 GB total VRAM), it fits with ~13 GB VRAM remaining for active KV cache.
+Qwen2.5-Coder-32B-Instruct-Abliterated combines the strongest open-weights code intelligence (matching GPT-4o on HumanEval and SWE-bench) with mathematical removal of refusal vectors. It executes complex cybersecurity, penetration testing, exploit analysis, anomaly detection, and vulnerability patching without refusal or moralizing. Sharded across Kaggle's dual Tesla T4 GPUs (32 GB total VRAM), it fits with ~13.5 GB VRAM remaining for active KV cache.
 
 ## Specifications
 
 | Property | Value |
 | --- | --- |
-| Architecture | Qwen2.5-Coder 32B Dense |
-| Quantization | `Qwen2.5-Coder-32B-Instruct-Q4_K_M.gguf` (18.49 GB) |
+| Architecture | Qwen2.5-Coder 32B Dense (Abliterated / Uncensored) |
+| Quantization | `Qwen2.5-Coder-32B-Instruct-abliterated-Q4_K_M.gguf` (18.49 GB) |
+| Model Repo | `bartowski/Qwen2.5-Coder-32B-Instruct-abliterated-GGUF` |
 | Context Window | 32,768 tokens |
 | VRAM Allocation | Layer-split across 2x T4 (16 GB each = 32 GB total) |
 | KV Cache Headroom | ~13.5 GB free for KV cache |
-| Best For | Complex repository refactors, architecture design, SWE-bench debugging |
+| Best For | Cybersecurity, penetration testing, vulnerability discovery, exploit analysis, anomaly detection, and patch engineering |
 | License | Apache-2.0 |
 
 ## Quick start

@@ -88,7 +88,7 @@ fi
 [[ -n "$URL" ]] || die "no tunnel URL; run: ./bin/cluster $PROJECT_NAME up"
 
 MODEL_TYPE="$(python3 -c 'import sys;sys.path.insert(0,sys.argv[1]);import kernel_config as k;print(k.CFG.get("__MODEL_TYPE__","llm"))' "$PROJECT" 2>/dev/null || echo llm)"
-if [[ "$MODEL_TYPE" == "flux" || "$MODEL_TYPE" == "sdxl" || "$MODEL_TYPE" == "omnigen" || "$MODEL_TYPE" == "janus" || "$MODEL_TYPE" == "zimage" ]]; then
+if [[ "$MODEL_TYPE" == "flux" || "$MODEL_TYPE" == "flux-face" || "$MODEL_TYPE" == "sdxl" || "$MODEL_TYPE" == "omnigen" || "$MODEL_TYPE" == "janus" || "$MODEL_TYPE" == "zimage" ]]; then
   die "'$PROJECT_NAME' is an image generation model, not a text LLM.
   - Interactive Web UI: $URL
   - CLI image generator: ./bin/cluster $PROJECT_NAME gen 'your prompt' -o output.png"
@@ -98,7 +98,7 @@ command -v opencode >/dev/null 2>&1 || die "opencode not found.
   Install it with:  npm i -g opencode-ai    (or: brew install sst/tap/opencode)
   Then re-run:      ./bin/cluster $PROJECT_NAME agent"
 
-CFG="$PROJECT/.cluster/opencode.json"
+CFG="$ROOT/.opencode/opencode.json"
 mkdir -p "$(dirname "$CFG")"
 
 python3 - "$PROJECT" "$URL" "$CFG" <<'PY'
@@ -134,6 +134,7 @@ cfg = {
             "options": {"baseURL": url.rstrip("/") + "/v1", "apiKey": api_key},
             "models": {
                 alias: {
+                    "id": alias,
                     "name": f"{name} (Kaggle GPU)",
                     "limit": {"context": ctx, "output": 8192},
                 }
@@ -144,10 +145,17 @@ cfg = {
 }
 with open(out, "w") as f:
     json.dump(cfg, f, indent=2)
+# Also keep a copy inside the project folder
+proj_cfg = os.path.join(project, ".cluster", "opencode.json")
+os.makedirs(os.path.dirname(proj_cfg), exist_ok=True)
+with open(proj_cfg, "w") as f:
+    json.dump(cfg, f, indent=2)
 print(f"wrote {out}\n  baseURL {cfg['provider']['cluster']['options']['baseURL']}\n  model   cluster/{alias}")
 PY
 
+opencode reload >/dev/null 2>&1 || true
+
 echo
-echo "launching opencode against $URL  (Ctrl-C or /exit to quit)"
+echo "launching opencode against $URL (Ctrl-C or /exit to quit)"
 echo "the Kaggle session keeps running; stop it later with: ./bin/cluster $PROJECT_NAME stop"
-exec env OPENCODE_CONFIG="$CFG" opencode "$@"
+exec opencode "$@"
