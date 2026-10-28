@@ -96,6 +96,10 @@ elif [[ "$MODEL_TYPE" == "parse" || "$MODEL_TYPE" == "nemotron-parse" ]]; then
   die "'$PROJECT_NAME' is a document OCR & layout parsing model.
   - Interactive Web UI: $URL
   - CLI document parser: ./bin/cluster $PROJECT_NAME parse <image_path> [--mode markdown|full|chart] [--out output.md]"
+elif [[ "$MODEL_TYPE" == "ming-tts" || "$MODEL_TYPE" == "tts" || "$MODEL_TYPE" == "ming" ]]; then
+  die "'$PROJECT_NAME' is a neural text-to-speech studio model.
+  - Interactive Web Studio: $URL
+  - CLI speech synthesizer: ./bin/cluster $PROJECT_NAME tts 'Your text here' [--out speech.wav] [--language English]"
 fi
 
 command -v opencode >/dev/null 2>&1 || die "opencode not found.

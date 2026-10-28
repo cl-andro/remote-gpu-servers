@@ -4101,3 +4101,586 @@ print("Stop from PC   : ctr.sh stop   (uses the control tunnel above)")
 '''
 
 PARSE_CELLS = [CELL_1_ENV, CELL_2_PARSE_DEPS, CELL_3_PARSE_SERVE, CELL_5_KEEPALIVE]
+
+
+# =============================================================================
+# Ming-3.0-TTS (0.5B Dense Multilingual & Expressive Text-to-Speech)
+# =============================================================================
+
+CELL_2_MING_DEPS = r'''
+# --- Cell 2: install dependencies for Ming-3.0-TTS -------------------------
+import subprocess, sys, os
+
+MING_REPO_DIR = "/kaggle/temp/Ming-3.0-tts"
+if not os.path.exists(MING_REPO_DIR):
+    subprocess.run(["git", "clone", "https://github.com/inclusionAI/Ming-3.0-tts.git", MING_REPO_DIR], check=True)
+
+pkgs = [
+    "transformers>=4.46.3",
+    "tokenizers",
+    "accelerate",
+    "soundfile",
+    "loguru",
+    "x_transformers",
+    "diffusers",
+    "onnxruntime",
+    "inflect",
+    "einops",
+    "scipy",
+    "numpy",
+]
+print("installing:", " ".join(pkgs), flush=True)
+subprocess.run([sys.executable, "-m", "pip", "install", "-q"] + pkgs, check=True)
+print("Ming-3.0-TTS packages installed successfully.", flush=True)
+'''
+
+CELL_3_MING_SERVE = r'''
+# --- Cell 3: load Ming-3.0-TTS engine + start server + open tunnels -------
+import os, sys, re, subprocess, time, urllib.request, json, threading, http.server
+import base64, io, gc
+import torch
+import soundfile as sf
+import numpy as np
+
+PORT = int("__PORT__")
+CTL_PORT = int("__CTL_PORT__")
+MODEL_REPO = "__MODEL_REPO__"
+MODEL_ALIAS = "__MODEL_ALIAS__"
+DEFAULT_LANGUAGE = "__DEFAULT_LANGUAGE__" or "English"
+
+STOP_REQUESTED = threading.Event()
+TTS_LOCK = threading.Lock()
+
+WORK = "/kaggle/temp/run"
+os.makedirs(WORK, exist_ok=True)
+CF_LOG = os.path.join(WORK, "cloudflared.log")
+CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
+
+# ---- cloudflared binary ----
+CF = "/kaggle/temp/cloudflared"
+if not os.path.exists(CF):
+    subprocess.run(["curl", "-sL", "-o", CF,
+                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
+                   check=True)
+    os.chmod(CF, 0o755)
+
+# ---- load Ming-3.0-TTS ----
+MING_REPO_DIR = "/kaggle/temp/Ming-3.0-tts"
+if MING_REPO_DIR not in sys.path:
+    sys.path.insert(0, MING_REPO_DIR)
+
+from ming_tts import MingTTS
+
+print(f"Loading {MODEL_REPO} engine onto GPU...", flush=True)
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+tts_engine = MingTTS(
+    model_path=MODEL_REPO,
+    device=device,
+    text_normalization=False,
+    cache_prompts=True
+)
+print(f"Ming-3.0-TTS engine loaded and ready on {device}!", flush=True)
+
+SAMPLE_RATE = 44100
+
+def generate_speech(text: str, language: str = "English", prompt_wav_bytes: bytes = None, prompt_text: str = None):
+    lang = language.capitalize() if language else "English"
+    if lang not in ("English", "Chinese", "German", "Spanish", "French", "Korean", "Japanese", "Sichuanese", "Cantonese"):
+        lang = "English"
+
+    temp_prompt_wav = None
+    use_spk_emb = False
+    if prompt_wav_bytes:
+        temp_prompt_wav = os.path.join(WORK, f"prompt_{int(time.time()*1000)}.wav")
+        with open(temp_prompt_wav, "wb") as f:
+            f.write(prompt_wav_bytes)
+        use_spk_emb = True
+
+    out_wav_file = os.path.join(WORK, f"out_{int(time.time()*1000)}.wav")
+    try:
+        out = tts_engine.synthesize(
+            task="TTS",
+            text=text,
+            language_id=lang,
+            prompt_wav_path=temp_prompt_wav,
+            prompt_text=prompt_text or "",
+            use_spk_emb=use_spk_emb,
+            output_path=out_wav_file
+        )
+        if os.path.exists(out_wav_file):
+            with open(out_wav_file, "rb") as f:
+                wav_bytes = f.read()
+            try:
+                os.remove(out_wav_file)
+            except Exception:
+                pass
+            return wav_bytes
+        elif out is not None:
+            buf = io.BytesIO()
+            arr = out.cpu().numpy() if hasattr(out, "cpu") else np.array(out)
+            if arr.ndim == 2:
+                arr = arr[0]
+            sf.write(buf, arr, SAMPLE_RATE, format="WAV")
+            return buf.getvalue()
+        else:
+            raise RuntimeError("Synthesis returned no output")
+    finally:
+        if temp_prompt_wav and os.path.exists(temp_prompt_wav):
+            try:
+                os.remove(temp_prompt_wav)
+            except Exception:
+                pass
+
+# ---- Control Server on CTL_PORT (port 8081) ----
+STOP_TOKEN = os.environ.get("CLUSTER_STOP_TOKEN") or os.urandom(8).hex()
+
+class CtlHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def _send(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path.rstrip("/") in ("", "/health"):
+            self._send(200, {"ok": True, "status": "up",
+                             "stopping": STOP_REQUESTED.is_set(),
+                             "model": MODEL_ALIAS})
+        elif self.path.startswith("/stop/" + STOP_TOKEN):
+            STOP_REQUESTED.set()
+            self._send(200, {"ok": True, "message": "shutdown requested"})
+            print("STOP_REQUESTED received via control tunnel", flush=True)
+        else:
+            self._send(404, {"ok": False, "error": "not found"})
+
+    def do_POST(self):
+        self.do_GET()
+
+ctl = http.server.ThreadingHTTPServer(("127.0.0.1", CTL_PORT), CtlHandler)
+threading.Thread(target=ctl.serve_forever, daemon=True).start()
+
+# ---- Ming TTS Web & API Server on PORT (port 8080) ----
+HTML_PAGE = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ming-3.0-TTS Studio (0.5B) — Neural Text-to-Speech</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  body { background: #080d1a; color: #e2e8f0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 24px 16px; }
+  .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; width: 100%; max-width: 860px; padding: 28px; box-shadow: 0 12px 32px rgba(0,0,0,0.6); margin-bottom: 24px; }
+  h1 { font-size: 1.7rem; color: #fff; margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
+  .badge { font-size: 0.75rem; background: #8b5cf6; color: #fff; padding: 3px 10px; border-radius: 6px; font-weight: 700; }
+  p.subtitle { color: #94a3b8; font-size: 0.92rem; margin-bottom: 20px; line-height: 1.4; }
+  label { display: block; font-size: 0.85rem; font-weight: 600; color: #cbd5e1; margin-bottom: 6px; }
+  textarea { width: 100%; background: #0b0f19; border: 1px solid #334155; border-radius: 8px; color: #fff; padding: 12px; font-size: 0.95rem; min-height: 110px; resize: vertical; margin-bottom: 12px; }
+  textarea:focus { outline: none; border-color: #8b5cf6; }
+  .tag-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+  .tag-btn { background: #1f2937; border: 1px solid #374151; color: #c4b5fd; padding: 4px 10px; border-radius: 6px; font-size: 0.8rem; cursor: pointer; transition: all 0.15s; }
+  .tag-btn:hover { background: #8b5cf6; color: #fff; border-color: #8b5cf6; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
+  select, input { width: 100%; background: #0b0f19; border: 1px solid #334155; border-radius: 8px; color: #fff; padding: 10px; font-size: 0.9rem; }
+  .clone-box { background: rgba(139, 92, 246, 0.04); border: 1px dashed #4b5563; border-radius: 10px; padding: 16px; margin-bottom: 18px; }
+  .clone-title { font-size: 0.85rem; font-weight: 700; color: #a78bfa; margin-bottom: 8px; }
+  button.submit-btn { width: 100%; background: #7c3aed; color: #fff; border: none; padding: 14px 20px; font-size: 1.05rem; font-weight: 700; border-radius: 8px; cursor: pointer; transition: background 0.2s; }
+  button.submit-btn:hover { background: #6d28d9; }
+  button.submit-btn:disabled { background: #475569; cursor: not-allowed; }
+  #status { margin-top: 14px; font-size: 0.92rem; color: #a78bfa; text-align: center; }
+  .audio-output { margin-top: 22px; background: #0b0f19; border: 1px solid #334155; border-radius: 10px; padding: 18px; text-align: center; display: none; }
+  audio { width: 100%; margin-top: 10px; outline: none; }
+  .dl-btn { display: inline-block; margin-top: 12px; background: #10b981; color: #fff; text-decoration: none; padding: 8px 18px; border-radius: 6px; font-size: 0.88rem; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Ming-3.0-TTS <span class="badge">0.5B STUDIO</span></h1>
+  <p class="subtitle">Ant Group & InclusionAI Studio-Grade Neural Speech Synthesis — 44.1 kHz, 7+ Languages, Zero-Shot Voice Cloning & Paralinguistic Expression.</p>
+
+  <label for="textInput">Text to Synthesize</label>
+  <textarea id="textInput" placeholder="Enter speech text here... You can use inline paralinguistic expression tags like [laughter], [breath], or [sigh].">Hello! Welcome to the remote GPU cluster. Ming 3.0 TTS delivers crystal clear speech with 44.1 kHz studio audio.</textarea>
+
+  <div class="tag-bar">
+    <span style="font-size:0.8rem; color:#94a3b8; align-self:center;">Insert expression:</span>
+    <button class="tag-btn" onclick="insertTag('[laughter]')">+ [laughter]</button>
+    <button class="tag-btn" onclick="insertTag('[breath]')">+ [breath]</button>
+    <button class="tag-btn" onclick="insertTag('[sigh]')">+ [sigh]</button>
+    <button class="tag-btn" onclick="insertTag('[whisper]')">+ [whisper]</button>
+    <button class="tag-btn" onclick="insertTag('[cough]')">+ [cough]</button>
+  </div>
+
+  <div class="row">
+    <div>
+      <label for="langSelect">Language / Dialect</label>
+      <select id="langSelect">
+        <option value="English" selected>English</option>
+        <option value="Chinese">Chinese (Mandarin)</option>
+        <option value="Cantonese">Cantonese</option>
+        <option value="Sichuanese">Sichuanese</option>
+        <option value="Spanish">Spanish</option>
+        <option value="French">French</option>
+        <option value="German">German</option>
+        <option value="Japanese">Japanese</option>
+        <option value="Korean">Korean</option>
+      </select>
+    </div>
+    <div>
+      <label for="speedInput">Speed Multiplier</label>
+      <input type="number" id="speedInput" value="1.0" min="0.5" max="2.0" step="0.1">
+    </div>
+  </div>
+
+  <div class="clone-box">
+    <div class="clone-title">Zero-Shot Voice Cloning (Optional)</div>
+    <div class="row" style="margin-bottom:0;">
+      <div>
+        <label for="refAudio">Reference Audio Clip (WAV/MP3)</label>
+        <input type="file" id="refAudio" accept="audio/*">
+      </div>
+      <div>
+        <label for="refText">Reference Audio Transcript</label>
+        <input type="text" id="refText" placeholder="Exact words spoken in reference audio">
+      </div>
+    </div>
+  </div>
+
+  <button class="submit-btn" id="synthBtn" onclick="synthesizeSpeech()">Synthesize Speech (44.1 kHz)</button>
+  <div id="status"></div>
+
+  <div class="audio-output" id="audioBox">
+    <div style="font-size:0.95rem; font-weight:700; color:#fff;">Generated Audio (44.1 kHz WAV)</div>
+    <audio id="audioPlayer" controls></audio><br>
+    <a id="downloadLink" class="dl-btn" href="#" download="ming3_tts.wav">Download WAV</a>
+  </div>
+</div>
+
+<script>
+function insertTag(tag) {
+  const ta = document.getElementById('textInput');
+  const start = ta.selectionStart;
+  const end = ta.selectionEnd;
+  const val = ta.value;
+  ta.value = val.substring(0, start) + ' ' + tag + ' ' + val.substring(end);
+  ta.focus();
+  ta.selectionEnd = start + tag.length + 2;
+}
+
+async function synthesizeSpeech() {
+  const text = document.getElementById('textInput').value.trim();
+  if (!text) return alert('Please enter some text to synthesize');
+  const lang = document.getElementById('langSelect').value;
+  const btn = document.getElementById('synthBtn');
+  const status = document.getElementById('status');
+  const audioBox = document.getElementById('audioBox');
+  const player = document.getElementById('audioPlayer');
+  const dl = document.getElementById('downloadLink');
+
+  btn.disabled = true;
+  audioBox.style.display = 'none';
+  status.textContent = 'Synthesizing 44.1 kHz audio on Kaggle GPU...';
+  const t0 = Date.now();
+
+  try {
+    const refFile = document.getElementById('refAudio').files[0];
+    const refText = document.getElementById('refText').value.trim();
+    let refAudioB64 = '';
+    if (refFile) {
+      refAudioB64 = await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.readAsDataURL(refFile);
+      });
+    }
+
+    const payload = {
+      text: text,
+      language: lang,
+      prompt_audio: refAudioB64,
+      prompt_text: refText
+    };
+
+    const resp = await fetch('/v1/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!resp.ok) {
+      const err = await resp.text();
+      throw new Error(`HTTP ${resp.status}: ${err}`);
+    }
+    const data = await resp.json();
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(2);
+    status.textContent = `Generated in ${elapsed}s (${data.elapsed_seconds}s model inference)`;
+
+    const audioBlob = new Blob([Uint8Array.from(atob(data.audio_b64), c => c.charCodeAt(0))], { type: 'audio/wav' });
+    const audioUrl = URL.createObjectURL(audioBlob);
+    player.src = audioUrl;
+    dl.href = audioUrl;
+    audioBox.style.display = 'block';
+    player.play();
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+</script>
+</body>
+</html>
+"""
+
+AUTH_USER = "__AUTH_USER__" or os.environ.get("CLUSTER_AUTH_USER", "")
+AUTH_PASS = "__AUTH_PASS__" or os.environ.get("CLUSTER_AUTH_PASS", "")
+AUTH_KEY = "__AUTH_KEY__" or os.environ.get("CLUSTER_API_KEY", "")
+AUTH_ENABLED = bool((AUTH_USER and AUTH_PASS) or AUTH_KEY)
+
+class ServerHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+
+    def _check_auth(self):
+        if not AUTH_ENABLED:
+            return True
+        path = self.path.split("?")[0].rstrip("/")
+        if path in ("/health", "/v1/health", "/healthz"):
+            return True
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Basic "):
+            try:
+                creds = base64.b64decode(auth[6:].strip()).decode("utf-8")
+                u, p = creds.split(":", 1)
+                if u == AUTH_USER and p == AUTH_PASS:
+                    return True
+            except Exception:
+                pass
+        elif auth.startswith("Bearer "):
+            token = auth[7:].strip()
+            if (AUTH_KEY and token == AUTH_KEY) or (AUTH_PASS and token == AUTH_PASS):
+                return True
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="AI Cluster Protected"')
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(b'{"error": "Unauthorized"}\n')
+        return False
+
+    def _send_json(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.end_headers()
+
+    def do_HEAD(self):
+        if not self._check_auth(): return
+        self.do_GET()
+
+    def do_GET(self):
+        if not self._check_auth(): return
+        path = self.path.split("?")[0].rstrip("/")
+        if path in ("", "/index.html"):
+            body = HTML_PAGE.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path in ("/health", "/v1/health"):
+            self._send_json(200, {
+                "status": "ok",
+                "model": MODEL_ALIAS,
+                "architecture": "ming-tts-0.5b",
+                "sample_rate": SAMPLE_RATE,
+                "device": "cuda" if torch.cuda.is_available() else "cpu"
+            })
+        elif path in ("/models", "/v1/models"):
+            self._send_json(200, {
+                "data": [{
+                    "id": MODEL_ALIAS,
+                    "object": "model",
+                    "type": "text-to-speech"
+                }]
+            })
+        else:
+            self._send_json(404, {"error": f"Path {path} not found"})
+
+    def do_POST(self):
+        if not self._check_auth(): return
+        path = self.path.split("?")[0].rstrip("/")
+        content_len = int(self.headers.get("Content-Length", 0))
+        post_data = self.rfile.read(content_len) if content_len > 0 else b"{}"
+        try:
+            req = json.loads(post_data.decode("utf-8"))
+        except Exception:
+            return self._send_json(400, {"error": "Invalid JSON payload"})
+
+        if path in ("/v1/tts", "/tts", "/v1/audio/speech"):
+            text = req.get("text") or req.get("input", "")
+            if not text:
+                return self._send_json(400, {"error": "Missing input text"})
+
+            language = req.get("language") or req.get("voice") or DEFAULT_LANGUAGE
+            prompt_audio_raw = req.get("prompt_audio")
+            prompt_wav_bytes = None
+            if prompt_audio_raw:
+                try:
+                    if prompt_audio_raw.startswith("data:"):
+                        prompt_audio_raw = prompt_audio_raw.split(",", 1)[-1]
+                    prompt_wav_bytes = base64.b64decode(prompt_audio_raw)
+                except Exception as e:
+                    return self._send_json(400, {"error": f"Invalid prompt_audio: {e}"})
+
+            prompt_text = req.get("prompt_text", "")
+
+            t0 = time.time()
+            with TTS_LOCK:
+                try:
+                    wav_bytes = generate_speech(
+                        text=text,
+                        language=language,
+                        prompt_wav_bytes=prompt_wav_bytes,
+                        prompt_text=prompt_text
+                    )
+                except Exception as e:
+                    return self._send_json(500, {"error": f"Synthesis failed: {e}"})
+            elapsed = round(time.time() - t0, 3)
+
+            # If request expects raw audio (e.g. OpenAI /v1/audio/speech)
+            fmt = req.get("response_format", "").lower()
+            accept = self.headers.get("Accept", "").lower()
+            if path == "/v1/audio/speech" and (fmt in ("wav", "audio/wav") or "audio" in accept):
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Content-Length", str(len(wav_bytes)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(wav_bytes)
+                return
+
+            b64_audio = base64.b64encode(wav_bytes).decode("utf-8")
+            return self._send_json(200, {
+                "status": "ok",
+                "audio_b64": b64_audio,
+                "format": "wav",
+                "sample_rate": SAMPLE_RATE,
+                "elapsed_seconds": elapsed
+            })
+
+        elif path in ("/v1/chat/completions", "/chat/completions"):
+            messages = req.get("messages", [])
+            prompt_str = ""
+            for msg in messages:
+                c = msg.get("content")
+                if isinstance(c, str):
+                    prompt_str += c + " "
+
+            if "CLUSTER ONLINE" in prompt_str.upper():
+                reply = "CLUSTER ONLINE - Ming-3.0-TTS 0.5B studio server is online."
+            else:
+                reply = "Ming-3.0-TTS 0.5B server is online. Use POST /v1/audio/speech or /v1/tts to synthesize speech."
+
+            return self._send_json(200, {
+                "id": f"chatcmpl-{int(time.time())}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": MODEL_ALIAS,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": reply
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": len(reply.split()),
+                    "total_tokens": 10 + len(reply.split())
+                }
+            })
+        else:
+            self._send_json(404, {"error": f"POST {path} not supported"})
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), ServerHandler)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+print("Ming-3.0-TTS server running on port", PORT, flush=True)
+
+# ---- publish both tunnels ----
+CF_TOKEN = "__CLOUDFLARE_TUNNEL_TOKEN__" or os.environ.get("CLOUDFLARE_TUNNEL_TOKEN", "")
+STATIC_URL = "__STATIC_URL__" or os.environ.get("CLUSTER_URL", "")
+
+def start_public_tunnel(url, log_path):
+    fh = open(log_path, "w")
+    if CF_TOKEN:
+        print("Starting named Cloudflare tunnel with token...", flush=True)
+        proc = subprocess.Popen([CF, "tunnel", "--no-autoupdate", "run", "--token", CF_TOKEN, "--url", url],
+                                stdout=fh, stderr=subprocess.STDOUT)
+        time.sleep(5)
+        if proc.poll() is not None:
+            fh.flush()
+            print("cloudflared failed to start! Log tail:", flush=True)
+            print(open(log_path).read()[-2000:], flush=True)
+            raise RuntimeError("named cloudflared tunnel exited immediately")
+        return STATIC_URL or "https://ai.883742.xyz"
+    else:
+        subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
+                         stdout=fh, stderr=subprocess.STDOUT)
+        for _ in range(60):
+            time.sleep(2)
+            m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open(log_path).read())
+            if m:
+                return m.group(0)
+        return None
+
+def start_tunnel(url, log_path):
+    fh = open(log_path, "w")
+    subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
+                     stdout=fh, stderr=subprocess.STDOUT)
+    for _ in range(60):
+        time.sleep(2)
+        m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open(log_path).read())
+        if m:
+            return m.group(0)
+    return None
+
+public_url = start_public_tunnel(f"http://127.0.0.1:{PORT}", CF_LOG)
+control_url = start_tunnel(f"http://127.0.0.1:{CTL_PORT}", CTL_LOG)
+
+if not public_url:
+    print("cloudflared log:", open(CF_LOG).read()[-2000:], flush=True)
+    raise RuntimeError("could not obtain a public tunnel URL")
+if not control_url:
+    print("control cloudflared log:", open(CTL_LOG).read()[-2000:], flush=True)
+    raise RuntimeError("could not obtain a control tunnel URL")
+
+with open("/kaggle/working/CONTROL_URL.txt", "w") as f:
+    f.write(public_url + "\n")
+with open("/kaggle/working/STOP_URL.txt", "w") as f:
+    f.write(control_url + "/stop/" + STOP_TOKEN + "\n")
+
+print("=" * 72)
+print("CONTROL_URL=" + public_url)
+print("STOP_URL=" + control_url + "/stop/" + STOP_TOKEN)
+print("MODEL=" + MODEL_REPO)
+print("=" * 72)
+print(f"Web UI         : {public_url}")
+print(f"TTS endpoint   : {public_url}/v1/audio/speech")
+print(f"API endpoint   : {public_url}/v1/tts")
+print(f"Health         : {public_url}/health")
+print("Stop from PC   : ctr.sh stop   (uses the control tunnel above)")
+'''
+
+MING_CELLS = [CELL_1_ENV, CELL_2_MING_DEPS, CELL_3_MING_SERVE, CELL_5_KEEPALIVE]

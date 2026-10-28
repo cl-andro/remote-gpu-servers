@@ -425,6 +425,39 @@ def cmd_parse(a) -> None:
         print(f"\n{GREEN}Saved output to {a.out}{RESET}")
 
 
+def cmd_tts(a) -> None:
+    """Synthesize speech using Ming-3.0-TTS server."""
+    import base64
+    url = resolve_url(a.url)
+    payload = {
+        "text": a.text,
+        "language": getattr(a, "language", "English"),
+        "response_format": "wav",
+    }
+    if getattr(a, "prompt_audio", None) and os.path.exists(a.prompt_audio):
+        with open(a.prompt_audio, "rb") as f:
+            payload["prompt_audio"] = base64.b64encode(f.read()).decode("utf-8")
+        if getattr(a, "prompt_text", None):
+            payload["prompt_text"] = a.prompt_text
+
+    req = authed_request(
+        f"{url}/v1/tts",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        res = json.loads(r.read().decode())
+    b64_data = res.get("audio_b64", "")
+    if not b64_data:
+        sys.exit(f"Error: {res.get('error', 'no audio returned')}")
+    audio_bytes = base64.b64decode(b64_data)
+    out_file = getattr(a, "out", "speech.wav") or "speech.wav"
+    with open(out_file, "wb") as f:
+        f.write(audio_bytes)
+    print(f"{GREEN}Saved {len(audio_bytes)} bytes audio ({res.get('sample_rate', 44100)} Hz) to: {out_file}{RESET}")
+    print(f"{DIM}Synthesis completed in {res.get('elapsed_seconds', 0)}s{RESET}")
+
+
 def cmd_raw(a) -> None:
     """POST arbitrary JSON to an arbitrary path:  cluster.py raw /props '{}'"""
     url = resolve_url(a.url)
@@ -562,6 +595,16 @@ def main() -> None:
     sp.add_argument("--raw", action="store_true", help="output raw tokens including bboxes and classes")
     sp.add_argument("--out", "-o", default=None, help="save parsed output to file")
     sp.set_defaults(func=cmd_parse)
+
+    sp = sub.add_parser("tts", help="synthesize speech via Ming-3.0-TTS")
+    sp.add_argument("text", help="text to synthesize into speech")
+    sp.add_argument("--language", "-l", default="English",
+                    choices=["English", "Chinese", "Cantonese", "Sichuanese", "Spanish", "French", "German", "Japanese", "Korean"],
+                    help="language/dialect (default English)")
+    sp.add_argument("--prompt-audio", help="reference audio file for voice cloning (WAV/MP3)")
+    sp.add_argument("--prompt-text", help="reference audio transcript")
+    sp.add_argument("--out", "-o", default="speech.wav", help="output WAV file (default speech.wav)")
+    sp.set_defaults(func=cmd_tts)
 
     a = p.parse_args()
     if a.cmd == "tools" and not getattr(a, "prompt", None):

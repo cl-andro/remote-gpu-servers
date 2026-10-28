@@ -229,13 +229,17 @@ PY
       echo "== test parse server =="
       python3 "$CLIENT" --url "$URL" --model "$MODEL_ALIAS" chat --no-think --max-tokens 128 \
         "Reply with exactly: CLUSTER ONLINE"
+    elif [[ "$MODEL_TYPE" == "ming-tts" || "$MODEL_TYPE" == "tts" || "$MODEL_TYPE" == "ming" ]]; then
+      echo "== test tts server =="
+      python3 "$CLIENT" --url "$URL" --model "$MODEL_ALIAS" chat --no-think --max-tokens 128 \
+        "Reply with exactly: CLUSTER ONLINE"
     else
       echo "== chat (no reasoning) =="
       python3 "$CLIENT" --url "$URL" --model "$MODEL_ALIAS" chat --no-think --max-tokens 128 \
         "Reply with exactly: CLUSTER ONLINE"
     fi
     ;;
-  chat|stream|repl|tools|health|props|models|slots|tokenize|raw|gen|parse)
+  chat|stream|repl|tools|health|props|models|slots|tokenize|raw|gen|parse|tts)
     # Direct passthrough to the stdlib client (one-shot chat, REPL, image gen, etc.).
     # `$@` already begins with the command name.
     URL="$(cat "$URL_FILE" 2>/dev/null || extract_url "$KERNEL" || true)"
