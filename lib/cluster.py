@@ -393,6 +393,38 @@ def cmd_gen(a) -> None:
         raise
 
 
+def cmd_parse(a) -> None:
+    """Parse document/image using Nemotron-3.5-Parse OCR server."""
+    import base64, mimetypes
+    url = resolve_url(a.url)
+    img_path = a.image
+    if not os.path.exists(img_path):
+        sys.exit(f"Image file not found: {img_path}")
+    mime = mimetypes.guess_type(img_path)[0] or "image/png"
+    with open(img_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+    payload = {
+        "image": f"data:{mime};base64,{b64}",
+        "prompt": getattr(a, "prompt", None) or "",
+        "mode": getattr(a, "mode", "markdown"),
+    }
+    if getattr(a, "max_tokens", None):
+        payload["max_new_tokens"] = int(a.max_tokens)
+    req = authed_request(
+        f"{url}/v1/parse",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        res = json.loads(r.read().decode())
+    out_text = res.get("raw" if getattr(a, "raw", False) else "text", "")
+    print(out_text)
+    if getattr(a, "out", None):
+        with open(a.out, "w") as f:
+            f.write(out_text)
+        print(f"\n{GREEN}Saved output to {a.out}{RESET}")
+
+
 def cmd_raw(a) -> None:
     """POST arbitrary JSON to an arbitrary path:  cluster.py raw /props '{}'"""
     url = resolve_url(a.url)
@@ -520,6 +552,16 @@ def main() -> None:
     sp.add_argument("--face", action="append", default=[], help="reference face image to swap onto detected faces")
     sp.add_argument("--out", "-o", default="output.png", help="output file path (default output.png)")
     sp.set_defaults(func=cmd_gen)
+
+    sp = sub.add_parser("parse", help="parse document image with Nemotron OCR")
+    sp.add_argument("image", help="path to document image (PNG, JPG, WebP)")
+    sp.add_argument("--mode", choices=["markdown", "full", "chart"], default="markdown",
+                    help="extraction mode: markdown (clean text/tables), full (bboxes+classes), or chart")
+    sp.add_argument("--prompt", default="", help="optional custom control prompt")
+    sp.add_argument("--max-tokens", type=int, default=4096, help="max output tokens (default 4096)")
+    sp.add_argument("--raw", action="store_true", help="output raw tokens including bboxes and classes")
+    sp.add_argument("--out", "-o", default=None, help="save parsed output to file")
+    sp.set_defaults(func=cmd_parse)
 
     a = p.parse_args()
     if a.cmd == "tools" and not getattr(a, "prompt", None):

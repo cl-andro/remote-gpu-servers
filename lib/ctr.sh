@@ -225,13 +225,17 @@ PY
         "a golden metallic robot in a futuristic desert, sharp focus, 8k" \
         --size 512x512 \
         --out "$PROJECT/test_output.png"
+    elif [[ "$MODEL_TYPE" == "parse" || "$MODEL_TYPE" == "nemotron-parse" ]]; then
+      echo "== test parse server =="
+      python3 "$CLIENT" --url "$URL" --model "$MODEL_ALIAS" chat --no-think --max-tokens 128 \
+        "Reply with exactly: CLUSTER ONLINE"
     else
       echo "== chat (no reasoning) =="
       python3 "$CLIENT" --url "$URL" --model "$MODEL_ALIAS" chat --no-think --max-tokens 128 \
         "Reply with exactly: CLUSTER ONLINE"
     fi
     ;;
-  chat|stream|repl|tools|health|props|models|slots|tokenize|raw|gen)
+  chat|stream|repl|tools|health|props|models|slots|tokenize|raw|gen|parse)
     # Direct passthrough to the stdlib client (one-shot chat, REPL, image gen, etc.).
     # `$@` already begins with the command name.
     URL="$(cat "$URL_FILE" 2>/dev/null || extract_url "$KERNEL" || true)"

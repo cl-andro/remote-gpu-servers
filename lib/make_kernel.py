@@ -23,7 +23,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from cells import CELLS, FLUX_CELLS, FLUX_FACE_CELLS, SDXL_CELLS, OMNIGEN_CELLS, JANUS_CELLS, Z_IMAGE_CELLS  # noqa: E402
+from cells import CELLS, FLUX_CELLS, FLUX_FACE_CELLS, SDXL_CELLS, OMNIGEN_CELLS, JANUS_CELLS, Z_IMAGE_CELLS, PARSE_CELLS  # noqa: E402
 
 # Placeholders whose value is not allowed to be empty.
 REQUIRED_LLM = (
@@ -102,6 +102,15 @@ DEFAULTS_ZIMAGE = {
     "__DEFAULT_HEIGHT__": "1024",
 }
 
+REQUIRED_PARSE = (
+    "__PROJECT_NAME__", "__MODEL_REPO__", "__PORT__", "__CTL_PORT__",
+    "__SERVE_MINUTES__", "__MODEL_ALIAS__",
+)
+
+DEFAULTS_PARSE = {
+    "__DEFAULT_MAX_TOKENS__": "4096",
+}
+
 
 COMMON_DEFAULTS = {
     "__CLOUDFLARE_TUNNEL_TOKEN__": "",
@@ -153,6 +162,9 @@ def load_cfg(project_dir: str) -> dict:
     elif model_type == "zimage":
         defaults = dict(DEFAULTS_ZIMAGE)
         required = REQUIRED_ZIMAGE
+    elif model_type in ("parse", "nemotron-parse"):
+        defaults = dict(DEFAULTS_PARSE)
+        required = REQUIRED_PARSE
     else:
         defaults = dict(DEFAULTS_LLM)
         required = REQUIRED_LLM
@@ -208,6 +220,8 @@ def main() -> None:
         template_cells = JANUS_CELLS
     elif model_type == "zimage":
         template_cells = Z_IMAGE_CELLS
+    elif model_type in ("parse", "nemotron-parse"):
+        template_cells = PARSE_CELLS
     else:
         template_cells = CELLS
     cells = [render(c, cfg) for c in template_cells]
