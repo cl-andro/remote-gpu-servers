@@ -92,6 +92,10 @@ if [[ "$MODEL_TYPE" == "flux" || "$MODEL_TYPE" == "flux-face" || "$MODEL_TYPE" =
   die "'$PROJECT_NAME' is an image generation model, not a text LLM.
   - Interactive Web UI: $URL
   - CLI image generator: ./bin/cluster $PROJECT_NAME gen 'your prompt' -o output.png"
+elif [[ "$MODEL_TYPE" == "parse" || "$MODEL_TYPE" == "nemotron-parse" ]]; then
+  die "'$PROJECT_NAME' is a document OCR & layout parsing model.
+  - Interactive Web UI: $URL
+  - CLI document parser: ./bin/cluster $PROJECT_NAME parse <image_path> [--mode markdown|full|chart] [--out output.md]"
 fi
 
 command -v opencode >/dev/null 2>&1 || die "opencode not found.
