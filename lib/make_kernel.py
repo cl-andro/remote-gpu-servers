@@ -23,7 +23,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from cells import CELLS, FLUX_CELLS, FLUX_FACE_CELLS, SDXL_CELLS, OMNIGEN_CELLS, JANUS_CELLS, Z_IMAGE_CELLS, PARSE_CELLS, MING_CELLS  # noqa: E402
+from cells import CELLS, FLUX_CELLS, FLUX_FACE_CELLS, SDXL_CELLS, OMNIGEN_CELLS, JANUS_CELLS, Z_IMAGE_CELLS, PARSE_CELLS, MING_CELLS, SENSENOVA_CELLS  # noqa: E402
 
 # Placeholders whose value is not allowed to be empty.
 REQUIRED_LLM = (
@@ -120,6 +120,16 @@ DEFAULTS_MING = {
     "__DEFAULT_LANGUAGE__": "English",
 }
 
+REQUIRED_SENSENOVA = (
+    "__PROJECT_NAME__", "__MODEL_REPO__", "__PORT__", "__CTL_PORT__",
+    "__SERVE_MINUTES__", "__MODEL_ALIAS__",
+)
+
+DEFAULTS_SENSENOVA = {
+    "__CTX__": "32768",
+    "__DEFAULT_MAX_TOKENS__": "4096",
+}
+
 
 COMMON_DEFAULTS = {
     "__CLOUDFLARE_TUNNEL_TOKEN__": "",
@@ -177,6 +187,9 @@ def load_cfg(project_dir: str) -> dict:
     elif model_type in ("ming-tts", "tts", "ming"):
         defaults = dict(DEFAULTS_MING)
         required = REQUIRED_MING
+    elif model_type in ("sensenova", "sensenova-loop", "loop"):
+        defaults = dict(DEFAULTS_SENSENOVA)
+        required = REQUIRED_SENSENOVA
     else:
         defaults = dict(DEFAULTS_LLM)
         required = REQUIRED_LLM
@@ -236,6 +249,8 @@ def main() -> None:
         template_cells = PARSE_CELLS
     elif model_type in ("ming-tts", "tts", "ming"):
         template_cells = MING_CELLS
+    elif model_type in ("sensenova", "sensenova-loop", "loop"):
+        template_cells = SENSENOVA_CELLS
     else:
         template_cells = CELLS
     cells = [render(c, cfg) for c in template_cells]

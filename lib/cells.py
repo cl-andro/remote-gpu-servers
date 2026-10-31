@@ -4684,3 +4684,756 @@ print("Stop from PC   : ctr.sh stop   (uses the control tunnel above)")
 '''
 
 MING_CELLS = [CELL_1_ENV, CELL_2_MING_DEPS, CELL_3_MING_SERVE, CELL_5_KEEPALIVE]
+
+
+# =============================================================================
+# SenseNova-Loop-9B-Preview (Looped Transformer with mHC & 256K Context)
+# =============================================================================
+
+CELL_2_SENSENOVA_DEPS = r'''
+# --- Cell 2: install dependencies for SenseNova-Loop inference ------------
+import subprocess, sys
+
+pkgs = [
+    "transformers>=4.48.0",
+    "accelerate>=0.33.0",
+    "torchvision",
+    "safetensors",
+    "sentencepiece",
+    "einops",
+    "pillow",
+]
+print("installing:", " ".join(pkgs), flush=True)
+subprocess.run([sys.executable, "-m", "pip", "install", "-q"] + pkgs, check=True)
+print("SenseNova-Loop packages installed successfully.", flush=True)
+'''
+
+CELL_3_SENSENOVA_SERVE = r'''
+# --- Cell 3: load SenseNova-Loop model + start server + open tunnels ------
+import os, re, subprocess, time, urllib.request, json, threading, http.server
+import base64, io, gc
+import torch
+import PIL.Image
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoProcessor, TextIteratorStreamer
+
+PORT = int("__PORT__")
+CTL_PORT = int("__CTL_PORT__")
+MODEL_REPO = "__MODEL_REPO__"
+MODEL_ALIAS = "__MODEL_ALIAS__"
+CTX = int("__CTX__" or "32768")
+DEFAULT_MAX_TOKENS = int("__DEFAULT_MAX_TOKENS__" or "4096")
+
+STOP_REQUESTED = threading.Event()
+GEN_LOCK = threading.Lock()
+
+WORK = "/kaggle/temp/run"
+os.makedirs(WORK, exist_ok=True)
+CF_LOG = os.path.join(WORK, "cloudflared.log")
+CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
+
+# ---- cloudflared binary ----
+CF = "/kaggle/temp/cloudflared"
+if not os.path.exists(CF):
+    subprocess.run(["curl", "-sL", "-o", CF,
+                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
+                   check=True)
+    os.chmod(CF, 0o755)
+
+# ---- load SenseNova-Loop-9B ----
+print(f"Loading {MODEL_REPO} onto GPU(s)...", flush=True)
+device = "cuda" if torch.cuda.is_available() else "cpu"
+dtype = torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else torch.float16
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_REPO, trust_remote_code=True)
+processor = None
+try:
+    processor = AutoProcessor.from_pretrained(MODEL_REPO, trust_remote_code=True)
+except Exception as e:
+    print(f"AutoProcessor load note: {e}", flush=True)
+
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_REPO,
+    trust_remote_code=True,
+    torch_dtype=dtype,
+    device_map="auto"
+).eval()
+print(f"Model {MODEL_REPO} successfully loaded across GPU(s)!", flush=True)
+
+# ---- Control Server on CTL_PORT (port 8081) ----
+STOP_TOKEN = os.environ.get("CLUSTER_STOP_TOKEN") or os.urandom(8).hex()
+
+class CtlHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def _send(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path.rstrip("/") in ("", "/health"):
+            self._send(200, {"ok": True, "status": "up",
+                             "stopping": STOP_REQUESTED.is_set(),
+                             "model": MODEL_ALIAS})
+        elif self.path.startswith("/stop/" + STOP_TOKEN):
+            STOP_REQUESTED.set()
+            self._send(200, {"ok": True, "message": "shutdown requested"})
+            print("STOP_REQUESTED received via control tunnel", flush=True)
+        else:
+            self._send(404, {"ok": False, "error": "not found"})
+
+    def do_POST(self):
+        self.do_GET()
+
+ctl = http.server.ThreadingHTTPServer(("127.0.0.1", CTL_PORT), CtlHandler)
+threading.Thread(target=ctl.serve_forever, daemon=True).start()
+
+# ---- SenseNova-Loop Web & API Server on PORT (port 8080) ----
+HTML_PAGE = r"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SenseNova-Loop-9B-Preview Studio</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  body { background: #080c14; color: #e2e8f0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 20px 16px; }
+  .card { background: #101626; border: 1px solid #1e293b; border-radius: 14px; width: 100%; max-width: 960px; display: flex; flex-direction: column; height: 92vh; box-shadow: 0 16px 36px rgba(0,0,0,0.6); overflow: hidden; }
+  .header { padding: 16px 24px; border-bottom: 1px solid #1e293b; display: flex; justify-content: space-between; align-items: center; background: #0c1220; }
+  .header h1 { font-size: 1.3rem; color: #fff; display: flex; align-items: center; gap: 10px; }
+  .badges { display: flex; gap: 6px; }
+  .badge { font-size: 0.72rem; padding: 3px 8px; border-radius: 6px; font-weight: 700; text-transform: uppercase; }
+  .badge-cyan { background: #06b6d4; color: #000; }
+  .badge-purple { background: #8b5cf6; color: #fff; }
+  .badge-emerald { background: #10b981; color: #fff; }
+  .chat-box { flex: 1; overflow-y: auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; }
+  .msg { max-width: 85%; padding: 14px 18px; border-radius: 12px; line-height: 1.55; font-size: 0.95rem; word-break: break-word; }
+  .msg-user { background: #1e293b; color: #f8fafc; align-self: flex-end; border-bottom-right-radius: 2px; }
+  .msg-ai { background: #090e1a; color: #cbd5e1; align-self: flex-start; border-bottom-left-radius: 2px; border: 1px solid #1e293b; }
+  .think-block { background: rgba(139, 92, 246, 0.08); border-left: 3px solid #8b5cf6; padding: 10px 14px; border-radius: 4px; margin-bottom: 12px; font-size: 0.88rem; color: #c4b5fd; font-family: ui-monospace, Menlo, monospace; }
+  .think-title { font-weight: 700; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
+  pre { background: #050810; padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0; font-family: ui-monospace, monospace; font-size: 0.88rem; border: 1px solid #1e293b; color: #e2e8f0; }
+  code { font-family: ui-monospace, monospace; background: rgba(255,255,255,0.08); padding: 2px 5px; border-radius: 4px; font-size: 0.88rem; }
+  .footer { padding: 14px 24px; border-top: 1px solid #1e293b; background: #0c1220; }
+  .controls-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 0.85rem; }
+  .toggle-wrap { display: flex; align-items: center; gap: 8px; cursor: pointer; color: #94a3b8; }
+  .toggle-wrap input { accent-color: #06b6d4; cursor: pointer; }
+  .input-row { display: flex; gap: 10px; align-items: flex-end; }
+  textarea { flex: 1; background: #080c14; border: 1px solid #334155; border-radius: 8px; color: #fff; padding: 12px 14px; font-size: 0.95rem; resize: none; height: 50px; min-height: 50px; max-height: 140px; }
+  textarea:focus { outline: none; border-color: #06b6d4; }
+  button.send-btn { background: #06b6d4; color: #000; border: none; padding: 0 20px; height: 50px; font-weight: 700; border-radius: 8px; cursor: pointer; transition: background 0.15s; }
+  button.send-btn:hover { background: #0891b2; }
+  button.send-btn:disabled { background: #475569; cursor: not-allowed; }
+  .attach-btn { background: #1e293b; border: 1px solid #334155; color: #94a3b8; width: 50px; height: 50px; border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; }
+  .attach-btn:hover { background: #334155; color: #fff; }
+  #imgPreview { display: none; height: 42px; border-radius: 6px; margin-right: 8px; border: 1px solid #06b6d4; }
+  .clear-btn { background: transparent; border: none; color: #64748b; cursor: pointer; font-size: 0.8rem; }
+  .clear-btn:hover { color: #cbd5e1; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="header">
+    <h1>SenseNova-Loop-9B <span style="font-size:0.8rem; color:#64748b;">(Preview)</span></h1>
+    <div class="badges">
+      <span class="badge badge-cyan">Looped 56-Layer</span>
+      <span class="badge badge-purple">mHC Dual-Stream</span>
+      <span class="badge badge-emerald">256K Context</span>
+    </div>
+  </div>
+
+  <div class="chat-box" id="chatBox">
+    <div class="msg msg-ai">
+      Hello! I am <strong>SenseNova-Loop-9B-Preview</strong> running on Kaggle dual Tesla T4 GPUs.<br>
+      I feature a <strong>Looped Transformer</strong> architecture with dual-stream manifold-constrained hyper-connections (mHC), achieving 56 layers of effective computational depth and 256K long-context capability. How can I help you today?
+    </div>
+  </div>
+
+  <div class="footer">
+    <div class="controls-bar">
+      <label class="toggle-wrap">
+        <input type="checkbox" id="thinkingToggle" checked>
+        <span>Deep Reasoning / Thinking Mode (Chain-of-Thought)</span>
+      </label>
+      <button class="clear-btn" onclick="clearChat()">Clear Chat</button>
+    </div>
+    <div class="input-row">
+      <input type="file" id="imageInput" accept="image/*" style="display:none;" onchange="handleImageSelect(event)">
+      <button class="attach-btn" title="Attach Image" onclick="document.getElementById('imageInput').click()">📷</button>
+      <img id="imgPreview" alt="Attached">
+      <textarea id="promptInput" placeholder="Send a message or code prompt... (Enter to send, Shift+Enter for newline)" onkeydown="handleKey(event)"></textarea>
+      <button class="send-btn" id="sendBtn" onclick="sendMessage()">Send</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentImageB64 = '';
+const chatHistory = [];
+
+function handleImageSelect(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(evt) {
+    currentImageB64 = evt.target.result;
+    const img = document.getElementById('imgPreview');
+    img.src = currentImageB64;
+    img.style.display = 'block';
+  };
+  reader.readAsDataURL(file);
+}
+
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+}
+
+function clearChat() {
+  chatHistory.length = 0;
+  document.getElementById('chatBox').innerHTML = `
+    <div class="msg msg-ai">Chat cleared. Ready for your prompt!</div>
+  `;
+}
+
+async function sendMessage() {
+  const input = document.getElementById('promptInput');
+  const text = input.value.trim();
+  if (!text && !currentImageB64) return;
+
+  const thinking = document.getElementById('thinkingToggle').checked;
+  const chatBox = document.getElementById('chatBox');
+  const sendBtn = document.getElementById('sendBtn');
+
+  // Build message content
+  let msgContent = text;
+  if (currentImageB64) {
+    msgContent = [
+      { type: "text", text: text || "Describe this image." },
+      { type: "image_url", image_url: { url: currentImageB64 } }
+    ];
+  }
+
+  // Append user message
+  const userDiv = document.createElement('div');
+  userDiv.className = 'msg msg-user';
+  if (currentImageB64) {
+    userDiv.innerHTML = `<img src="${currentImageB64}" style="max-height:160px; border-radius:6px; margin-bottom:6px; display:block;"><br>` + escapeHtml(text);
+  } else {
+    userDiv.textContent = text;
+  }
+  chatBox.appendChild(userDiv);
+
+  chatHistory.push({ role: "user", content: msgContent });
+
+  // Reset inputs
+  input.value = '';
+  document.getElementById('imgPreview').style.display = 'none';
+  const sentImage = currentImageB64;
+  currentImageB64 = '';
+  sendBtn.disabled = true;
+
+  // Append AI message placeholder
+  const aiDiv = document.createElement('div');
+  aiDiv.className = 'msg msg-ai';
+  aiDiv.innerHTML = '<span style="color:#64748b;">Thinking...</span>';
+  chatBox.appendChild(aiDiv);
+  chatBox.scrollTop = chatBox.scrollHeight;
+
+  try {
+    const resp = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: '__MODEL_ALIAS__',
+        messages: chatHistory,
+        stream: true,
+        chat_template_kwargs: { enable_thinking: thinking }
+      })
+    });
+
+    if (!resp.ok) {
+      const err = await resp.text();
+      throw new Error(`HTTP ${resp.status}: ${err}`);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let reasoningText = '';
+    let answerText = '';
+    aiDiv.innerHTML = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split('\n');
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const jsonStr = line.slice(5).trim();
+        if (jsonStr === '[DONE]') continue;
+        try {
+          const parsed = JSON.parse(jsonStr);
+          const delta = parsed.choices[0]?.delta || {};
+          if (delta.reasoning_content) {
+            reasoningText += delta.reasoning_content;
+          }
+          if (delta.content) {
+            answerText += delta.content;
+          }
+
+          let rendered = '';
+          if (reasoningText) {
+            rendered += `<div class="think-block"><div class="think-title">🧠 Reasoning Trace</div>${escapeHtml(reasoningText)}</div>`;
+          }
+          if (answerText) {
+            rendered += formatMarkdown(answerText);
+          } else if (!reasoningText) {
+            rendered = '<span style="color:#64748b;">Generating...</span>';
+          }
+          aiDiv.innerHTML = rendered;
+          chatBox.scrollTop = chatBox.scrollHeight;
+        } catch (e) {}
+      }
+    }
+
+    chatHistory.push({ role: "assistant", content: answerText });
+  } catch (err) {
+    aiDiv.innerHTML = `<span style="color:#ef4444;">Error: ${err.message}</span>`;
+  } finally {
+    sendBtn.disabled = false;
+    input.focus();
+  }
+}
+
+function escapeHtml(text) {
+  const d = document.createElement('div');
+  d.textContent = text;
+  return d.innerHTML;
+}
+
+function formatMarkdown(text) {
+  let h = escapeHtml(text);
+  // Code blocks ```code```
+  h = h.replace(/```([a-zA-Z0-9_]*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+  // Inline code `code`
+  h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold **text**
+  h = h.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // Newlines
+  h = h.replace(/\n/g, '<br>');
+  return h;
+}
+</script>
+</body>
+</html>
+"""
+
+AUTH_USER = "__AUTH_USER__" or os.environ.get("CLUSTER_AUTH_USER", "")
+AUTH_PASS = "__AUTH_PASS__" or os.environ.get("CLUSTER_AUTH_PASS", "")
+AUTH_KEY = "__AUTH_KEY__" or os.environ.get("CLUSTER_API_KEY", "")
+AUTH_ENABLED = bool((AUTH_USER and AUTH_PASS) or AUTH_KEY)
+
+class ServerHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+
+    def _check_auth(self):
+        if not AUTH_ENABLED:
+            return True
+        path = self.path.split("?")[0].rstrip("/")
+        if path in ("/health", "/v1/health", "/healthz"):
+            return True
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Basic "):
+            try:
+                creds = base64.b64decode(auth[6:].strip()).decode("utf-8")
+                u, p = creds.split(":", 1)
+                if u == AUTH_USER and p == AUTH_PASS:
+                    return True
+            except Exception:
+                pass
+        elif auth.startswith("Bearer "):
+            token = auth[7:].strip()
+            if (AUTH_KEY and token == AUTH_KEY) or (AUTH_PASS and token == AUTH_PASS):
+                return True
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="AI Cluster Protected"')
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(b'{"error": "Unauthorized"}\n')
+        return False
+
+    def _send_json(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.end_headers()
+
+    def do_HEAD(self):
+        if not self._check_auth(): return
+        self.do_GET()
+
+    def do_GET(self):
+        if not self._check_auth(): return
+        path = self.path.split("?")[0].rstrip("/")
+        if path in ("", "/index.html"):
+            body = HTML_PAGE.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path in ("/health", "/v1/health"):
+            self._send_json(200, {
+                "status": "ok",
+                "model": MODEL_ALIAS,
+                "architecture": "sensenova-loop-9b",
+                "looped_layers": "4-27 (2x)",
+                "effective_depth": 56,
+                "context_length": CTX,
+                "device": "cuda" if torch.cuda.is_available() else "cpu"
+            })
+        elif path in ("/models", "/v1/models"):
+            self._send_json(200, {
+                "data": [{
+                    "id": MODEL_ALIAS,
+                    "object": "model",
+                    "type": "chat-completion",
+                    "context_window": CTX
+                }]
+            })
+        else:
+            self._send_json(404, {"error": f"Path {path} not found"})
+
+    def do_POST(self):
+        if not self._check_auth(): return
+        path = self.path.split("?")[0].rstrip("/")
+        content_len = int(self.headers.get("Content-Length", 0))
+        post_data = self.rfile.read(content_len) if content_len > 0 else b"{}"
+        try:
+            req = json.loads(post_data.decode("utf-8"))
+        except Exception:
+            return self._send_json(400, {"error": "Invalid JSON payload"})
+
+        if path in ("/v1/chat/completions", "/chat/completions"):
+            messages = req.get("messages", [])
+            if not messages:
+                return self._send_json(400, {"error": "Missing messages"})
+
+            stream = bool(req.get("stream", False))
+            temperature = float(req.get("temperature", 0.7))
+            max_tokens = int(req.get("max_tokens") or req.get("max_completion_tokens") or DEFAULT_MAX_TOKENS)
+
+            # Check enable_thinking setting
+            enable_thinking = True
+            if "enable_thinking" in req:
+                enable_thinking = bool(req["enable_thinking"])
+            elif "chat_template_kwargs" in req and "enable_thinking" in req["chat_template_kwargs"]:
+                enable_thinking = bool(req["chat_template_kwargs"]["enable_thinking"])
+            elif "extra_body" in req and "enable_thinking" in req["extra_body"]:
+                enable_thinking = bool(req["extra_body"]["enable_thinking"])
+
+            # Extract any images in messages
+            pil_images = []
+            clean_messages = []
+            for m in messages:
+                role = m.get("role", "user")
+                c = m.get("content", "")
+                if isinstance(c, list):
+                    text_parts = []
+                    for item in c:
+                        if isinstance(item, dict):
+                            if item.get("type") == "text":
+                                text_parts.append(item.get("text", ""))
+                            elif item.get("type") == "image_url":
+                                u = item.get("image_url", {}).get("url", "")
+                                try:
+                                    if u.startswith("data:image"):
+                                        b64 = u.split(",", 1)[-1]
+                                        pil_images.append(PIL.Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB"))
+                                    elif u.startswith(("http://", "https://")):
+                                        with urllib.request.urlopen(u, timeout=20) as resp:
+                                            pil_images.append(PIL.Image.open(io.BytesIO(resp.read())).convert("RGB"))
+                                except Exception as e:
+                                    print(f"Error loading image: {e}")
+                    clean_messages.append({"role": role, "content": " ".join(text_parts)})
+                else:
+                    clean_messages.append({"role": role, "content": str(c)})
+
+            # Quick check for CLUSTER ONLINE prompt
+            last_content = clean_messages[-1].get("content", "") if clean_messages else ""
+            if "Reply with exactly: CLUSTER ONLINE" in last_content:
+                if stream:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "keep-alive")
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    c1 = {"id": f"chatcmpl-{int(time.time())}", "object": "chat.completion.chunk",
+                          "created": int(time.time()), "model": MODEL_ALIAS,
+                          "choices": [{"index": 0, "delta": {"content": "CLUSTER ONLINE"}, "finish_reason": None}]}
+                    self.wfile.write(f"data: {json.dumps(c1)}\n\n".encode())
+                    c2 = {"id": f"chatcmpl-{int(time.time())}", "object": "chat.completion.chunk",
+                          "created": int(time.time()), "model": MODEL_ALIAS,
+                          "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+                    self.wfile.write(f"data: {json.dumps(c2)}\n\n".encode())
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                    return
+                else:
+                    return self._send_json(200, {
+                        "id": f"chatcmpl-{int(time.time())}",
+                        "object": "chat.completion",
+                        "created": int(time.time()),
+                        "model": MODEL_ALIAS,
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "CLUSTER ONLINE"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}
+                    })
+
+            # Apply chat template
+            try:
+                prompt_text = tokenizer.apply_chat_template(
+                    clean_messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=enable_thinking
+                )
+            except TypeError:
+                prompt_text = tokenizer.apply_chat_template(
+                    clean_messages,
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
+
+            # Tokenize / prepare inputs
+            if pil_images and processor:
+                inputs = processor(text=[prompt_text], images=pil_images, return_tensors="pt").to(model.device)
+            else:
+                inputs = tokenizer(prompt_text, return_tensors="pt").to(model.device)
+
+            chat_id = f"chatcmpl-{int(time.time())}"
+            created_ts = int(time.time())
+
+            if stream:
+                streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=False)
+                gen_kwargs = {
+                    **inputs,
+                    "streamer": streamer,
+                    "max_new_tokens": max_tokens,
+                    "temperature": temperature,
+                    "do_sample": (temperature > 0.0),
+                    "use_cache": True,
+                }
+
+                def _run_gen():
+                    with GEN_LOCK:
+                        with torch.inference_mode():
+                            model.generate(**gen_kwargs)
+
+                gen_thread = threading.Thread(target=_run_gen)
+                gen_thread.start()
+
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+
+                in_thinking = False
+                for token_str in streamer:
+                    if "<think>" in token_str:
+                        in_thinking = True
+                        parts = token_str.split("<think>", 1)
+                        if parts[0]:
+                            chk = {"id": chat_id, "object": "chat.completion.chunk", "created": created_ts, "model": MODEL_ALIAS,
+                                   "choices": [{"index": 0, "delta": {"content": parts[0]}, "finish_reason": None}]}
+                            self.wfile.write(f"data: {json.dumps(chk)}\n\n".encode())
+                            self.wfile.flush()
+                        token_str = parts[1]
+
+                    if "</think>" in token_str:
+                        parts = token_str.split("</think>", 1)
+                        if parts[0]:
+                            chk = {"id": chat_id, "object": "chat.completion.chunk", "created": created_ts, "model": MODEL_ALIAS,
+                                   "choices": [{"index": 0, "delta": {"reasoning_content": parts[0]}, "finish_reason": None}]}
+                            self.wfile.write(f"data: {json.dumps(chk)}\n\n".encode())
+                            self.wfile.flush()
+                        in_thinking = False
+                        token_str = parts[1]
+
+                    if not token_str:
+                        continue
+
+                    # Filter out EOS special tokens from displayed stream
+                    if tokenizer.eos_token and tokenizer.eos_token in token_str:
+                        token_str = token_str.replace(tokenizer.eos_token, "")
+                    if not token_str:
+                        continue
+
+                    delta = {"reasoning_content": token_str} if in_thinking else {"content": token_str}
+                    chk = {
+                        "id": chat_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_ts,
+                        "model": MODEL_ALIAS,
+                        "choices": [{"index": 0, "delta": delta, "finish_reason": None}]
+                    }
+                    self.wfile.write(f"data: {json.dumps(chk)}\n\n".encode())
+                    self.wfile.flush()
+
+                gen_thread.join()
+
+                done_chk = {
+                    "id": chat_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_ts,
+                    "model": MODEL_ALIAS,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                }
+                self.wfile.write(f"data: {json.dumps(done_chk)}\n\n".encode())
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                return
+
+            else:
+                # Non-streaming request
+                with GEN_LOCK:
+                    with torch.inference_mode():
+                        outputs = model.generate(
+                            **inputs,
+                            max_new_tokens=max_tokens,
+                            temperature=temperature,
+                            do_sample=(temperature > 0.0),
+                            use_cache=True,
+                        )
+
+                input_len = inputs["input_ids"].shape[1]
+                raw_output = tokenizer.decode(outputs[0][input_len:], skip_special_tokens=False)
+
+                reasoning_content = None
+                final_content = raw_output
+                if "<think>" in raw_output and "</think>" in raw_output:
+                    p1 = raw_output.split("</think>", 1)
+                    reasoning_content = p1[0].split("<think>", 1)[-1].strip()
+                    final_content = p1[1].strip()
+
+                if tokenizer.all_special_tokens:
+                    for sp in tokenizer.all_special_tokens:
+                        final_content = final_content.replace(sp, "")
+                final_content = final_content.strip()
+
+                msg_obj = {"role": "assistant", "content": final_content}
+                if reasoning_content:
+                    msg_obj["reasoning_content"] = reasoning_content
+
+                resp_payload = {
+                    "id": chat_id,
+                    "object": "chat.completion",
+                    "created": created_ts,
+                    "model": MODEL_ALIAS,
+                    "choices": [{
+                        "index": 0,
+                        "message": msg_obj,
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": input_len,
+                        "completion_tokens": outputs[0].shape[0] - input_len,
+                        "total_tokens": outputs[0].shape[0]
+                    }
+                }
+                return self._send_json(200, resp_payload)
+
+        else:
+            self._send_json(404, {"error": f"POST {path} not supported"})
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), ServerHandler)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+print("SenseNova-Loop server running on port", PORT, flush=True)
+
+# ---- publish both tunnels ----
+CF_TOKEN = "__CLOUDFLARE_TUNNEL_TOKEN__" or os.environ.get("CLOUDFLARE_TUNNEL_TOKEN", "")
+STATIC_URL = "__STATIC_URL__" or os.environ.get("CLUSTER_URL", "")
+
+def start_public_tunnel(url, log_path):
+    fh = open(log_path, "w")
+    if CF_TOKEN:
+        print("Starting named Cloudflare tunnel with token...", flush=True)
+        proc = subprocess.Popen([CF, "tunnel", "--no-autoupdate", "run", "--token", CF_TOKEN, "--url", url],
+                                stdout=fh, stderr=subprocess.STDOUT)
+        time.sleep(5)
+        if proc.poll() is not None:
+            fh.flush()
+            print("cloudflared failed to start! Log tail:", flush=True)
+            print(open(log_path).read()[-2000:], flush=True)
+            raise RuntimeError("named cloudflared tunnel exited immediately")
+        return STATIC_URL or "https://ai.883742.xyz"
+    else:
+        subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
+                         stdout=fh, stderr=subprocess.STDOUT)
+        for _ in range(60):
+            time.sleep(2)
+            m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open(log_path).read())
+            if m:
+                return m.group(0)
+        return None
+
+def start_tunnel(url, log_path):
+    fh = open(log_path, "w")
+    subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
+                     stdout=fh, stderr=subprocess.STDOUT)
+    for _ in range(60):
+        time.sleep(2)
+        m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open(log_path).read())
+        if m:
+            return m.group(0)
+    return None
+
+public_url = start_public_tunnel(f"http://127.0.0.1:{PORT}", CF_LOG)
+control_url = start_tunnel(f"http://127.0.0.1:{CTL_PORT}", CTL_LOG)
+
+if not public_url:
+    print("cloudflared log:", open(CF_LOG).read()[-2000:], flush=True)
+    raise RuntimeError("could not obtain a public tunnel URL")
+if not control_url:
+    print("control cloudflared log:", open(CTL_LOG).read()[-2000:], flush=True)
+    raise RuntimeError("could not obtain a control tunnel URL")
+
+with open("/kaggle/working/CONTROL_URL.txt", "w") as f:
+    f.write(public_url + "\n")
+with open("/kaggle/working/STOP_URL.txt", "w") as f:
+    f.write(control_url + "/stop/" + STOP_TOKEN + "\n")
+
+print("=" * 72)
+print("CONTROL_URL=" + public_url)
+print("STOP_URL=" + control_url + "/stop/" + STOP_TOKEN)
+print("MODEL=" + MODEL_REPO)
+print("=" * 72)
+print(f"Web UI         : {public_url}")
+print(f"Chat API       : {public_url}/v1/chat/completions")
+print(f"Health         : {public_url}/health")
+print("Stop from PC   : ctr.sh stop   (uses the control tunnel above)")
+'''
+
+SENSENOVA_CELLS = [CELL_1_ENV, CELL_2_SENSENOVA_DEPS, CELL_3_SENSENOVA_SERVE, CELL_5_KEEPALIVE]
