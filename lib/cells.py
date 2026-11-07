@@ -5437,3 +5437,566 @@ print("Stop from PC   : ctr.sh stop   (uses the control tunnel above)")
 '''
 
 SENSENOVA_CELLS = [CELL_1_ENV, CELL_2_SENSENOVA_DEPS, CELL_3_SENSENOVA_SERVE, CELL_5_KEEPALIVE]
+
+# =============================================================================
+# Baidu Unlimited-OCR-2 Document Intelligence Cells
+# =============================================================================
+
+CELL_2_UNLIMITED_OCR_DEPS = r'''
+# --- Cell 2: install dependencies for Baidu Unlimited-OCR-2 inference ---------
+import subprocess, sys
+
+pkgs = [
+    "transformers>=4.48.0",
+    "accelerate>=0.33.0",
+    "torchvision",
+    "tokenizers>=0.20.0",
+    "pillow",
+    "einops>=0.8.0",
+    "addict>=2.4.0",
+    "easydict>=1.13",
+    "timm>=1.0.0",
+]
+print("installing:", " ".join(pkgs), flush=True)
+subprocess.run([sys.executable, "-m", "pip", "install", "-q"] + pkgs, check=True)
+print("Unlimited-OCR-2 packages installed successfully.", flush=True)
+'''
+
+CELL_3_UNLIMITED_OCR_SERVE = r'''
+# --- Cell 3: load Baidu Unlimited-OCR-2 model + start server + open tunnels ---
+import os, re, subprocess, time, urllib.request, json, threading, http.server
+import base64, io, gc
+import torch
+import PIL.Image
+from transformers import AutoModel, AutoTokenizer
+
+PORT = int("__PORT__")
+CTL_PORT = int("__CTL_PORT__")
+MODEL_REPO = "__MODEL_REPO__"
+MODEL_ALIAS = "__MODEL_ALIAS__"
+DEFAULT_MAX_TOKENS = int("__DEFAULT_MAX_TOKENS__" or "4096")
+
+STOP_REQUESTED = threading.Event()
+INFER_LOCK = threading.Lock()
+
+WORK = "/kaggle/temp/run"
+os.makedirs(WORK, exist_ok=True)
+CF_LOG = os.path.join(WORK, "cloudflared.log")
+CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
+
+# ---- cloudflared binary ----
+CF = "/kaggle/temp/cloudflared"
+if not os.path.exists(CF):
+    subprocess.run(["curl", "-sL", "-o", CF,
+                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
+                   check=True)
+    os.chmod(CF, 0o755)
+
+# ---- load model ----
+print(f"Loading {MODEL_REPO} onto GPU...", flush=True)
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_REPO, trust_remote_code=True)
+model = AutoModel.from_pretrained(
+    MODEL_REPO,
+    trust_remote_code=True,
+    use_safetensors=True,
+    torch_dtype=dtype
+).eval()
+if torch.cuda.is_available():
+    model = model.cuda()
+print(f"Model {MODEL_REPO} loaded successfully onto {device}!", flush=True)
+
+@torch.inference_mode()
+def parse_document(images, prompt_str="", max_tokens=DEFAULT_MAX_TOKENS):
+    if not isinstance(images, (list, tuple)):
+        images = [images]
+    rgb_images = [img.convert("RGB") if hasattr(img, "convert") else img for img in images]
+    prompt = prompt_str.strip() or "Multi page parsing."
+    target_input = rgb_images if len(rgb_images) > 1 else rgb_images[0]
+    raw_result = model.infer(
+        tokenizer,
+        image_file=target_input,
+        prompt=prompt,
+        save_results=False,
+        max_new_tokens=max_tokens
+    )
+    if isinstance(raw_result, dict):
+        raw_result = raw_result.get("text", str(raw_result))
+    elif not isinstance(raw_result, str):
+        raw_result = str(raw_result)
+
+    clean_text = raw_result
+    clean_text = re.sub(r'</?(?:PAGE|image|s|eos|bos|unk)>', '', clean_text)
+    clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
+    return clean_text, raw_result
+
+# ---- Control Server on CTL_PORT (port 8081) ----
+STOP_TOKEN = os.environ.get("CLUSTER_STOP_TOKEN") or os.urandom(8).hex()
+
+class CtlHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def _send(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path.rstrip("/") in ("", "/health"):
+            self._send(200, {"ok": True, "status": "up",
+                             "stopping": STOP_REQUESTED.is_set(),
+                             "model": MODEL_ALIAS})
+        elif self.path.startswith("/stop/" + STOP_TOKEN):
+            STOP_REQUESTED.set()
+            self._send(200, {"ok": True, "message": "shutdown requested"})
+            print("STOP_REQUESTED received via control tunnel", flush=True)
+        else:
+            self._send(404, {"ok": False, "error": "not found"})
+
+    def do_POST(self):
+        self.do_GET()
+
+ctl = http.server.ThreadingHTTPServer(("127.0.0.1", CTL_PORT), CtlHandler)
+threading.Thread(target=ctl.serve_forever, daemon=True).start()
+
+# ---- Unlimited-OCR-2 Web & API Server on PORT (port 8080) ----
+HTML_PAGE = r"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unlimited-OCR-2 — Long- & Unlimited-Horizon Document Intelligence</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  body { background: #0b0f19; color: #e2e8f0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 24px 16px; }
+  .card { background: #151c2c; border: 1px solid #2d3748; border-radius: 14px; width: 100%; max-width: 950px; padding: 28px; box-shadow: 0 12px 32px rgba(0,0,0,0.5); margin-bottom: 24px; }
+  h1 { font-size: 1.7rem; color: #fff; margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
+  .badge { font-size: 0.75rem; background: #0284c7; color: #fff; padding: 3px 10px; border-radius: 6px; font-weight: 700; }
+  p.subtitle { color: #94a3b8; font-size: 0.92rem; margin-bottom: 20px; line-height: 1.4; }
+  .drop-zone { border: 2px dashed #0284c7; border-radius: 10px; padding: 28px 16px; text-align: center; cursor: pointer; transition: background 0.2s; background: rgba(2, 132, 199, 0.05); margin-bottom: 18px; }
+  .drop-zone:hover { background: rgba(2, 132, 199, 0.12); }
+  .drop-zone input { display: none; }
+  .drop-zone p { color: #38bdf8; font-size: 0.95rem; font-weight: 600; }
+  .drop-zone span { font-size: 0.8rem; color: #64748b; margin-top: 4px; display: block; }
+  .thumbs-container { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; justify-content: center; }
+  .thumb-item { position: relative; border-radius: 6px; overflow: hidden; border: 1px solid #334155; }
+  .thumb-item img { max-height: 140px; display: block; }
+  .thumb-badge { position: absolute; bottom: 4px; right: 4px; background: rgba(0,0,0,0.7); color: #fff; font-size: 0.7rem; padding: 2px 6px; border-radius: 4px; }
+  .options { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
+  label { display: block; font-size: 0.82rem; font-weight: 600; color: #cbd5e1; margin-bottom: 6px; }
+  select, input, textarea { width: 100%; background: #0b0f19; border: 1px solid #334155; border-radius: 8px; color: #fff; padding: 10px; font-size: 0.9rem; }
+  textarea { resize: vertical; min-height: 60px; font-family: inherit; }
+  .full-width { grid-column: span 2; }
+  button { width: 100%; background: #0284c7; color: #fff; border: none; padding: 14px 20px; font-size: 1.05rem; font-weight: 700; border-radius: 8px; cursor: pointer; transition: background 0.2s; }
+  button:hover { background: #0369a1; }
+  button:disabled { background: #475569; cursor: not-allowed; }
+  #status { margin-top: 14px; font-size: 0.92rem; color: #38bdf8; text-align: center; }
+  .output-box { margin-top: 20px; background: #0b0f19; border: 1px solid #334155; border-radius: 10px; padding: 18px; }
+  .output-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #1e293b; padding-bottom: 8px; }
+  .output-title { font-size: 0.95rem; font-weight: 700; color: #f1f5f9; }
+  .copy-btn { width: auto; background: #334155; padding: 6px 14px; font-size: 0.82rem; border-radius: 6px; }
+  .copy-btn:hover { background: #475569; }
+  pre { white-space: pre-wrap; word-break: break-word; color: #cbd5e1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88rem; max-height: 520px; overflow-y: auto; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Unlimited-OCR-2 <span class="badge">Baidu SR-SWA</span></h1>
+  <p class="subtitle">OCR-3.0 Unlimited-Horizon Document Intelligence. Parses single or multi-page documents, forms, receipts, tables, and papers into clean Markdown without context degradation.</p>
+
+  <div class="drop-zone" onclick="document.getElementById('fileInput').click()">
+    <input type="file" id="fileInput" accept="image/*" multiple onchange="handleFiles(event)">
+    <p>Drop document page(s) here or click to browse</p>
+    <span>Upload single or multiple pages in order (PNG, JPG, WebP)</span>
+    <div class="thumbs-container" id="thumbsContainer"></div>
+  </div>
+
+  <div class="options">
+    <div>
+      <label for="promptPreset">Preset Mode</label>
+      <select id="promptPreset" onchange="applyPreset()">
+        <option value="Multi page parsing.">Full Document Parsing (Markdown + Tables)</option>
+        <option value="Extract all tables in markdown format.">Tables & Numerical Extraction</option>
+        <option value="Parse key-value fields and form elements.">Key-Value / Forms Extraction</option>
+        <option value="custom">Custom Instruction</option>
+      </select>
+    </div>
+    <div>
+      <label for="maxTokens">Max Output Tokens</label>
+      <input type="number" id="maxTokens" value="4096" min="256" max="16384" step="256">
+    </div>
+    <div class="full-width">
+      <label for="customPrompt">Instruction Prompt</label>
+      <input type="text" id="customPrompt" value="Multi page parsing.">
+    </div>
+  </div>
+
+  <button id="parseBtn" onclick="parseDoc()">Parse Document with Unlimited-OCR-2</button>
+  <div id="status"></div>
+
+  <div class="output-box" id="outputBox" style="display:none;">
+    <div class="output-header">
+      <span class="output-title" id="outputTitle">Parsed Markdown</span>
+      <button class="copy-btn" onclick="copyResult()">Copy Markdown</button>
+    </div>
+    <pre id="resultText"></pre>
+  </div>
+</div>
+
+<script>
+let uploadedImages = [];
+
+function handleFiles(e) {
+  const files = Array.from(e.target.files);
+  if (!files.length) return;
+  uploadedImages = [];
+  const container = document.getElementById('thumbsContainer');
+  container.innerHTML = '';
+
+  files.forEach((file, index) => {
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const b64 = evt.target.result;
+      uploadedImages.push(b64);
+      const item = document.createElement('div');
+      item.className = 'thumb-item';
+      item.innerHTML = `<img src="${b64}"><span class="thumb-badge">P${index+1}</span>`;
+      container.appendChild(item);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+const dropZone = document.querySelector('.drop-zone');
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.style.background = 'rgba(2, 132, 199, 0.2)'; });
+dropZone.addEventListener('dragleave', () => { dropZone.style.background = 'rgba(2, 132, 199, 0.05)'; });
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropZone.style.background = 'rgba(2, 132, 199, 0.05)';
+  if (e.dataTransfer.files && e.dataTransfer.files.length) {
+    document.getElementById('fileInput').files = e.dataTransfer.files;
+    handleFiles({ target: { files: e.dataTransfer.files } });
+  }
+});
+
+function applyPreset() {
+  const preset = document.getElementById('promptPreset').value;
+  if (preset !== 'custom') {
+    document.getElementById('customPrompt').value = preset;
+  }
+}
+
+async function parseDoc() {
+  if (!uploadedImages.length) return alert('Please upload at least one document image');
+  const btn = document.getElementById('parseBtn');
+  const status = document.getElementById('status');
+  const outBox = document.getElementById('outputBox');
+  const resPre = document.getElementById('resultText');
+  const prompt = document.getElementById('customPrompt').value.trim() || 'Multi page parsing.';
+  const maxTokens = parseInt(document.getElementById('maxTokens').value) || 4096;
+
+  btn.disabled = true;
+  outBox.style.display = 'none';
+  status.textContent = `Parsing ${uploadedImages.length} page(s) on GPU with Unlimited-OCR-2...`;
+  const t0 = Date.now();
+
+  try {
+    const payload = {
+      images: uploadedImages,
+      prompt: prompt,
+      max_new_tokens: maxTokens
+    };
+    const resp = await fetch('/v1/parse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!resp.ok) {
+      const err = await resp.text();
+      throw new Error(`HTTP ${resp.status}: ${err}`);
+    }
+    const data = await resp.json();
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(2);
+    status.textContent = `Completed ${data.pages || uploadedImages.length} page(s) in ${elapsed}s (${data.elapsed_seconds}s model)`;
+    resPre.textContent = data.text || data.raw || 'No text extracted';
+    outBox.style.display = 'block';
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function copyResult() {
+  const text = document.getElementById('resultText').textContent;
+  navigator.clipboard.writeText(text).then(() => alert('Copied to clipboard!'));
+}
+</script>
+</body>
+</html>
+"""
+
+AUTH_USER = "__AUTH_USER__" or os.environ.get("CLUSTER_AUTH_USER", "")
+AUTH_PASS = "__AUTH_PASS__" or os.environ.get("CLUSTER_AUTH_PASS", "")
+AUTH_KEY = "__AUTH_KEY__" or os.environ.get("CLUSTER_API_KEY", "")
+AUTH_ENABLED = bool((AUTH_USER and AUTH_PASS) or AUTH_KEY)
+
+class ServerHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+
+    def _check_auth(self):
+        if not AUTH_ENABLED:
+            return True
+        path = self.path.split("?")[0].rstrip("/")
+        if path in ("/health", "/v1/health", "/healthz"):
+            return True
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Basic "):
+            try:
+                creds = base64.b64decode(auth[6:].strip()).decode("utf-8")
+                u, p = creds.split(":", 1)
+                if u == AUTH_USER and p == AUTH_PASS:
+                    return True
+            except Exception:
+                pass
+        elif auth.startswith("Bearer "):
+            token = auth[7:].strip()
+            if (AUTH_KEY and token == AUTH_KEY) or (AUTH_PASS and token == AUTH_PASS):
+                return True
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="AI Cluster Protected"')
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(b'{"error": "Unauthorized"}\n')
+        return False
+
+    def _send_json(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.end_headers()
+
+    def do_HEAD(self):
+        if not self._check_auth(): return
+        self.do_GET()
+
+    def do_GET(self):
+        if not self._check_auth(): return
+        path = self.path.split("?")[0].rstrip("/")
+        if path in ("", "/index.html"):
+            body = HTML_PAGE.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path in ("/health", "/v1/health"):
+            self._send_json(200, {
+                "status": "ok",
+                "model": MODEL_ALIAS,
+                "architecture": "unlimited-ocr-2",
+                "device": "cuda" if torch.cuda.is_available() else "cpu"
+            })
+        elif path in ("/models", "/v1/models"):
+            self._send_json(200, {
+                "data": [{
+                    "id": MODEL_ALIAS,
+                    "object": "model",
+                    "type": "document-parsing-ocr"
+                }]
+            })
+        else:
+            self._send_json(404, {"error": f"Path {path} not found"})
+
+    def do_POST(self):
+        if not self._check_auth(): return
+        path = self.path.split("?")[0].rstrip("/")
+        content_len = int(self.headers.get("Content-Length", 0))
+        post_data = self.rfile.read(content_len) if content_len > 0 else b"{}"
+        try:
+            req = json.loads(post_data.decode("utf-8"))
+        except Exception:
+            return self._send_json(400, {"error": "Invalid JSON payload"})
+
+        def load_pil(raw_str):
+            if raw_str.startswith("data:image"):
+                b64 = raw_str.split(",", 1)[-1]
+                return PIL.Image.open(io.BytesIO(base64.b64decode(b64)))
+            elif raw_str.startswith(("http://", "https://")):
+                with urllib.request.urlopen(raw_str, timeout=30) as r:
+                    return PIL.Image.open(io.BytesIO(r.read()))
+            else:
+                return PIL.Image.open(io.BytesIO(base64.b64decode(raw_str)))
+
+        if path in ("/v1/parse", "/parse"):
+            raw_imgs = []
+            if "images" in req and isinstance(req["images"], list):
+                raw_imgs = req["images"]
+            elif "image" in req:
+                raw_imgs = [req["image"]]
+
+            if not raw_imgs:
+                return self._send_json(400, {"error": "Missing image or images in payload"})
+
+            pil_images = []
+            for item in raw_imgs:
+                try:
+                    pil_images.append(load_pil(item))
+                except Exception as e:
+                    return self._send_json(400, {"error": f"Failed to decode image: {e}"})
+
+            prompt_str = req.get("prompt", "")
+            max_tokens = int(req.get("max_new_tokens", DEFAULT_MAX_TOKENS))
+
+            t0 = time.time()
+            with INFER_LOCK:
+                clean_text, raw_text = parse_document(pil_images, prompt_str=prompt_str, max_tokens=max_tokens)
+            elapsed = round(time.time() - t0, 3)
+
+            return self._send_json(200, {
+                "status": "ok",
+                "text": clean_text,
+                "raw": raw_text,
+                "pages": len(pil_images),
+                "elapsed_seconds": elapsed
+            })
+
+        elif path in ("/v1/chat/completions", "/chat/completions"):
+            messages = req.get("messages", [])
+            pil_images = []
+            prompt_str = ""
+            for msg in messages:
+                content = msg.get("content")
+                if isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "image_url":
+                            url_val = item.get("image_url", {}).get("url", "")
+                            try:
+                                pil_images.append(load_pil(url_val))
+                            except Exception as e:
+                                return self._send_json(400, {"error": f"Failed to decode image from message: {e}"})
+                        elif isinstance(item, dict) and item.get("type") == "text":
+                            prompt_str += item.get("text", "") + " "
+                elif isinstance(content, str):
+                    prompt_str += content + " "
+
+            prompt_str = prompt_str.strip() or "Multi page parsing."
+            max_tokens = int(req.get("max_tokens") or req.get("max_new_tokens", DEFAULT_MAX_TOKENS))
+
+            t0 = time.time()
+            with INFER_LOCK:
+                if pil_images:
+                    clean_text, raw_text = parse_document(pil_images, prompt_str=prompt_str, max_tokens=max_tokens)
+                else:
+                    clean_text = "Please provide an image of the document to parse."
+                    raw_text = clean_text
+            elapsed = round(time.time() - t0, 3)
+
+            chat_id = "chatcmpl-" + os.urandom(8).hex()
+            return self._send_json(200, {
+                "id": chat_id,
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": MODEL_ALIAS,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": clean_text
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": len(clean_text.split()),
+                    "total_tokens": 10 + len(clean_text.split())
+                }
+            })
+        else:
+            self._send_json(404, {"error": f"POST {path} not supported"})
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), ServerHandler)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+print("Unlimited-OCR-2 server running on port", PORT, flush=True)
+
+# ---- publish both tunnels ----
+CF_TOKEN = "__CLOUDFLARE_TUNNEL_TOKEN__" or os.environ.get("CLOUDFLARE_TUNNEL_TOKEN", "")
+STATIC_URL = "__STATIC_URL__" or os.environ.get("CLUSTER_URL", "")
+
+def start_public_tunnel(url, log_path):
+    fh = open(log_path, "w")
+    if CF_TOKEN:
+        print("Starting named Cloudflare tunnel with token...", flush=True)
+        proc = subprocess.Popen([CF, "tunnel", "--no-autoupdate", "run", "--token", CF_TOKEN, "--url", url],
+                                stdout=fh, stderr=subprocess.STDOUT)
+        time.sleep(5)
+        if proc.poll() is not None:
+            fh.flush()
+            print("cloudflared failed to start! Log tail:", flush=True)
+            print(open(log_path).read()[-2000:], flush=True)
+            raise RuntimeError("named cloudflared tunnel exited immediately")
+        return STATIC_URL or "https://ai.883742.xyz"
+    else:
+        subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
+                         stdout=fh, stderr=subprocess.STDOUT)
+        for _ in range(60):
+            time.sleep(2)
+            m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open(log_path).read())
+            if m:
+                return m.group(0)
+        return None
+
+def start_tunnel(url, log_path):
+    fh = open(log_path, "w")
+    subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
+                     stdout=fh, stderr=subprocess.STDOUT)
+    for _ in range(60):
+        time.sleep(2)
+        m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open(log_path).read())
+        if m:
+            return m.group(0)
+    return None
+
+public_url = start_public_tunnel(f"http://127.0.0.1:{PORT}", CF_LOG)
+control_url = start_tunnel(f"http://127.0.0.1:{CTL_PORT}", CTL_LOG)
+
+if not public_url:
+    print("cloudflared log:", open(CF_LOG).read()[-2000:], flush=True)
+    raise RuntimeError("could not obtain a public tunnel URL")
+if not control_url:
+    print("control cloudflared log:", open(CTL_LOG).read()[-2000:], flush=True)
+    raise RuntimeError("could not obtain a control tunnel URL")
+
+with open("/kaggle/working/CONTROL_URL.txt", "w") as f:
+    f.write(public_url + "\n")
+with open("/kaggle/working/STOP_URL.txt", "w") as f:
+    f.write(control_url + "/stop/" + STOP_TOKEN + "\n")
+
+print("=" * 72)
+print("CONTROL_URL=" + public_url)
+print("STOP_URL=" + control_url + "/stop/" + STOP_TOKEN)
+print("MODEL=" + MODEL_REPO)
+print("=" * 72)
+print(f"Web UI         : {public_url}")
+print(f"API endpoint   : {public_url}/v1/parse")
+print(f"Chat endpoint  : {public_url}/v1/chat/completions")
+print(f"Health         : {public_url}/health")
+print("Stop from PC   : ctr.sh stop   (uses the control tunnel above)")
+'''
+
+UNLIMITED_OCR_CELLS = [CELL_1_ENV, CELL_2_UNLIMITED_OCR_DEPS, CELL_3_UNLIMITED_OCR_SERVE, CELL_5_KEEPALIVE]
