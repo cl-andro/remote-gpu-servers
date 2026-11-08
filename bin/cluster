@@ -109,9 +109,27 @@ command -v opencode >/dev/null 2>&1 || die "opencode not found.
 CFG="$ROOT/.opencode/opencode.json"
 mkdir -p "$(dirname "$CFG")"
 
-python3 - "$PROJECT" "$URL" "$CFG" <<'PY'
+cleanup_agent() {
+  rm -f "$CFG"
+  rm -rf "$PROJECT/.cluster"
+  opencode reload >/dev/null 2>&1 || true
+}
+trap cleanup_agent EXIT INT TERM
+
+ARGS=()
+WITH_REA="false"
+for arg in "$@"; do
+  if [[ "$arg" == "--with-rea" ]]; then
+    WITH_REA="true"
+  else
+    ARGS+=("$arg")
+  fi
+done
+
+python3 - "$PROJECT" "$URL" "$CFG" "$WITH_REA" <<'PY'
 import json, os, sys
 project, url, out = sys.argv[1], sys.argv[2], sys.argv[3]
+with_rea = sys.argv[4].lower() in ("true", "1", "yes")
 
 root_env = os.path.abspath(os.path.join(project, "..", ".env"))
 if os.path.exists(root_env):
@@ -151,6 +169,18 @@ cfg = {
     },
     "model": f"cluster/{alias}",
 }
+
+if not with_rea:
+    # Disable rea during cluster agent runs to prevent 229 MCP tools from inflating system prompts to ~4k tokens
+    cfg["mcp"] = {
+        "rea": {
+            "type": "local",
+            "command": ["/home/alamgir-zk/.local/bin/rea", "mcp"],
+            "enabled": False,
+            "disabled": True,
+        }
+    }
+
 with open(out, "w") as f:
     json.dump(cfg, f, indent=2)
 # Also keep a copy inside the project folder
@@ -158,7 +188,9 @@ proj_cfg = os.path.join(project, ".cluster", "opencode.json")
 os.makedirs(os.path.dirname(proj_cfg), exist_ok=True)
 with open(proj_cfg, "w") as f:
     json.dump(cfg, f, indent=2)
-print(f"wrote {out}\n  baseURL {cfg['provider']['cluster']['options']['baseURL']}\n  model   cluster/{alias}")
+
+mcp_status = "enabled (--with-rea)" if with_rea else "automatically disabled (prompt prefill fast ~15s)"
+print(f"wrote {out}\n  baseURL {cfg['provider']['cluster']['options']['baseURL']}\n  model   cluster/{alias}\n  mcp     rea {mcp_status}")
 PY
 
 opencode reload >/dev/null 2>&1 || true
@@ -166,4 +198,4 @@ opencode reload >/dev/null 2>&1 || true
 echo
 echo "launching opencode against $URL (Ctrl-C or /exit to quit)"
 echo "the Kaggle session keeps running; stop it later with: ./bin/cluster $PROJECT_NAME stop"
-exec opencode "$@"
+opencode "${ARGS[@]}"
