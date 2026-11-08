@@ -30,9 +30,9 @@ print(subprocess.run(["nvidia-smi",
                      capture_output=True, text=True).stdout or "no nvidia-smi")
 
 print("--- internet ---")
-for u in ("https://huggingface.co", "https://github.com"):
-    r = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                        "--max-time", "30", u], capture_output=True, text=True)
+for u in ("https://huggingface.co", "https://github.com", "https://gh-proxy.com"):
+    r = subprocess.run(["curl", "-4", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                        "--connect-timeout", "5", "--max-time", "10", u], capture_output=True, text=True)
     print(u, "->", r.stdout)
 '''
 
@@ -110,44 +110,58 @@ os.makedirs(LLAMA_DIR, exist_ok=True)
 
 def llama_server_path():
     hits = glob.glob(os.path.join(LLAMA_DIR, "**", "llama-server"), recursive=True)
+    if hits:
+        return hits[0]
+    hits = glob.glob(os.path.join("/kaggle/input", "**", "llama-server"), recursive=True)
     return hits[0] if hits else None
 
 
 if not llama_server_path():
-    # CUDA build first; the cudart archive carries the matching CUDA runtime libs.
+    # 1. Check attached Kaggle datasets for prebuilt archives or binaries
     for asset in (f"llama-{LLAMA_BUILD}-bin-ubuntu-cuda-12.8-x64.tar.gz",
                   f"cudart-llama-{LLAMA_BUILD}-bin-ubuntu-cuda-12.8-x64.tar.gz"):
-        dest = os.path.join(LLAMA_DIR, asset)
-        url = f"{BASE}/{asset}"
-        extracted = False
-        for attempt in range(1, 4):
+        local_hits = glob.glob(os.path.join("/kaggle/input", "**", asset), recursive=True)
+        if local_hits:
+            print(f"Extracting {asset} from attached dataset: {local_hits[0]}", flush=True)
             try:
-                print(f"Downloading {asset} (attempt {attempt})...", flush=True)
-                subprocess.run([
-                    "curl", "-fSL", "--retry", "5", "--retry-delay", "3", "--retry-all-errors",
-                    "-A", "Mozilla/5.0 (X11; Linux x86_64)",
-                    "-o", dest, url
-                ], check=True)
-                subprocess.run(["tar", "-xzf", dest, "-C", LLAMA_DIR], check=True)
-                extracted = True
-                break
+                subprocess.run(["tar", "-xzf", local_hits[0], "-C", LLAMA_DIR], check=True)
             except Exception as e:
-                print(f"Error handling {asset}: {e}", flush=True)
-                if os.path.exists(dest):
+                print(f"Warning extracting {asset} from dataset: {e}", flush=True)
+
+    # 2. Fall back to downloading from GitHub Releases (with mirror fallback) if not found
+    if not llama_server_path():
+        for asset in (f"llama-{LLAMA_BUILD}-bin-ubuntu-cuda-12.8-x64.tar.gz",
+                      f"cudart-llama-{LLAMA_BUILD}-bin-ubuntu-cuda-12.8-x64.tar.gz"):
+            dest = os.path.join(LLAMA_DIR, asset)
+            candidate_urls = [
+                f"{BASE}/{asset}",
+                f"https://gh-proxy.com/{BASE}/{asset}",
+            ]
+            extracted = False
+            for url in candidate_urls:
+                for attempt in range(1, 3):
                     try:
-                        with open(dest, "rb") as f:
-                            preview = f.read(200)
-                        print("File preview:", preview, flush=True)
-                    except Exception:
-                        pass
-                    try:
-                        os.remove(dest)
-                    except Exception:
-                        pass
-                if attempt < 3:
-                    time.sleep(3)
-        if not extracted:
-            raise RuntimeError(f"Failed to download and extract {asset} after 3 attempts")
+                        print(f"Downloading {asset} from {url} (attempt {attempt})...", flush=True)
+                        subprocess.run([
+                            "curl", "-4", "-fSL", "--connect-timeout", "10", "--max-time", "180",
+                            "--retry", "2", "--retry-delay", "2", "--retry-all-errors",
+                            "-o", dest, url
+                        ], check=True)
+                        subprocess.run(["tar", "-xzf", dest, "-C", LLAMA_DIR], check=True)
+                        extracted = True
+                        break
+                    except Exception as e:
+                        print(f"Error handling {asset} from {url}: {e}", flush=True)
+                        if os.path.exists(dest):
+                            try:
+                                os.remove(dest)
+                            except Exception:
+                                pass
+                        time.sleep(2)
+                if extracted:
+                    break
+            if not extracted:
+                raise RuntimeError(f"Failed to download and extract {asset} from all candidate URLs")
 
 LLAMA_SERVER = llama_server_path()
 if not LLAMA_SERVER:
@@ -184,12 +198,31 @@ CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
 # ---- cloudflared (public URL) ----
 CF = "/kaggle/temp/cloudflared"
 if not os.path.exists(CF):
-    subprocess.run(["curl", "-fSL", "--retry", "5", "--retry-delay", "3", "--retry-all-errors",
-                    "-A", "Mozilla/5.0 (X11; Linux x86_64)",
-                    "-o", CF,
-                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
-                   check=True)
-    os.chmod(CF, 0o755)
+    cf_hits = glob.glob(os.path.join("/kaggle/input", "**", "cloudflared"), recursive=True)
+    if cf_hits:
+        print(f"Using cloudflared from attached dataset: {cf_hits[0]}", flush=True)
+        subprocess.run(["cp", cf_hits[0], CF], check=True)
+        os.chmod(CF, 0o755)
+    else:
+        cf_urls = [
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+            "https://gh-proxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+        ]
+        downloaded = False
+        for u in cf_urls:
+            try:
+                print(f"Downloading cloudflared from {u}...", flush=True)
+                subprocess.run(["curl", "-4", "-fSL", "--connect-timeout", "10", "--max-time", "120",
+                                "--retry", "2", "--retry-delay", "2",
+                                "-o", CF, u],
+                               check=True)
+                downloaded = True
+                break
+            except Exception as e:
+                print(f"Failed downloading cloudflared from {u}: {e}", flush=True)
+        if not downloaded:
+            raise RuntimeError("Failed to download cloudflared from all sources")
+        os.chmod(CF, 0o755)
 
 AUTH_USER = "__AUTH_USER__" or os.environ.get("CLUSTER_AUTH_USER", "")
 AUTH_PASS = "__AUTH_PASS__" or os.environ.get("CLUSTER_AUTH_PASS", "")
@@ -536,9 +569,23 @@ CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
 # ---- cloudflared binary ----
 CF = "/kaggle/temp/cloudflared"
 if not os.path.exists(CF):
-    subprocess.run(["curl", "-sL", "-o", CF,
-                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
-                   check=True)
+    cf_urls = [
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+        "https://gh-proxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+    ]
+    downloaded = False
+    for u in cf_urls:
+        try:
+            subprocess.run(["curl", "-4", "-fSL", "--connect-timeout", "10", "--max-time", "120",
+                            "--retry", "2", "--retry-delay", "2",
+                            "-o", CF, u],
+                           check=True)
+            downloaded = True
+            break
+        except Exception as e:
+            print(f"Failed downloading cloudflared from {u}: {e}", flush=True)
+    if not downloaded:
+        raise RuntimeError("Failed to download cloudflared from all sources")
     os.chmod(CF, 0o755)
 
 # ---- load pipeline ----
@@ -1016,9 +1063,23 @@ CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
 # ---- cloudflared binary ----
 CF = "/kaggle/temp/cloudflared"
 if not os.path.exists(CF):
-    subprocess.run(["curl", "-sL", "-o", CF,
-                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
-                   check=True)
+    cf_urls = [
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+        "https://gh-proxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+    ]
+    downloaded = False
+    for u in cf_urls:
+        try:
+            subprocess.run(["curl", "-4", "-fSL", "--connect-timeout", "10", "--max-time", "120",
+                            "--retry", "2", "--retry-delay", "2",
+                            "-o", CF, u],
+                           check=True)
+            downloaded = True
+            break
+        except Exception as e:
+            print(f"Failed downloading cloudflared from {u}: {e}", flush=True)
+    if not downloaded:
+        raise RuntimeError("Failed to download cloudflared from all sources")
     os.chmod(CF, 0o755)
 
 # ---- load pipeline ----
@@ -1576,9 +1637,23 @@ CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
 # ---- cloudflared binary ----
 CF = "/kaggle/temp/cloudflared"
 if not os.path.exists(CF):
-    subprocess.run(["curl", "-sL", "-o", CF,
-                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
-                   check=True)
+    cf_urls = [
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+        "https://gh-proxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+    ]
+    downloaded = False
+    for u in cf_urls:
+        try:
+            subprocess.run(["curl", "-4", "-fSL", "--connect-timeout", "10", "--max-time", "120",
+                            "--retry", "2", "--retry-delay", "2",
+                            "-o", CF, u],
+                           check=True)
+            downloaded = True
+            break
+        except Exception as e:
+            print(f"Failed downloading cloudflared from {u}: {e}", flush=True)
+    if not downloaded:
+        raise RuntimeError("Failed to download cloudflared from all sources")
     os.chmod(CF, 0o755)
 
 # ---- load pipeline ----
@@ -2134,9 +2209,23 @@ CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
 # ---- cloudflared binary ----
 CF = "/kaggle/temp/cloudflared"
 if not os.path.exists(CF):
-    subprocess.run(["curl", "-sL", "-o", CF,
-                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
-                   check=True)
+    cf_urls = [
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+        "https://gh-proxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+    ]
+    downloaded = False
+    for u in cf_urls:
+        try:
+            subprocess.run(["curl", "-4", "-fSL", "--connect-timeout", "10", "--max-time", "120",
+                            "--retry", "2", "--retry-delay", "2",
+                            "-o", CF, u],
+                           check=True)
+            downloaded = True
+            break
+        except Exception as e:
+            print(f"Failed downloading cloudflared from {u}: {e}", flush=True)
+    if not downloaded:
+        raise RuntimeError("Failed to download cloudflared from all sources")
     os.chmod(CF, 0o755)
 
 # ---- load model ----
@@ -2596,9 +2685,23 @@ CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
 # ---- cloudflared binary ----
 CF = "/kaggle/temp/cloudflared"
 if not os.path.exists(CF):
-    subprocess.run(["curl", "-sL", "-o", CF,
-                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
-                   check=True)
+    cf_urls = [
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+        "https://gh-proxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+    ]
+    downloaded = False
+    for u in cf_urls:
+        try:
+            subprocess.run(["curl", "-4", "-fSL", "--connect-timeout", "10", "--max-time", "120",
+                            "--retry", "2", "--retry-delay", "2",
+                            "-o", CF, u],
+                           check=True)
+            downloaded = True
+            break
+        except Exception as e:
+            print(f"Failed downloading cloudflared from {u}: {e}", flush=True)
+    if not downloaded:
+        raise RuntimeError("Failed to download cloudflared from all sources")
     os.chmod(CF, 0o755)
 
 # ---- load pipeline ----
@@ -3055,9 +3158,23 @@ CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
 # ---- cloudflared binary ----
 CF = "/kaggle/temp/cloudflared"
 if not os.path.exists(CF):
-    subprocess.run(["curl", "-sL", "-o", CF,
-                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
-                   check=True)
+    cf_urls = [
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+        "https://gh-proxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+    ]
+    downloaded = False
+    for u in cf_urls:
+        try:
+            subprocess.run(["curl", "-4", "-fSL", "--connect-timeout", "10", "--max-time", "120",
+                            "--retry", "2", "--retry-delay", "2",
+                            "-o", CF, u],
+                           check=True)
+            downloaded = True
+            break
+        except Exception as e:
+            print(f"Failed downloading cloudflared from {u}: {e}", flush=True)
+    if not downloaded:
+        raise RuntimeError("Failed to download cloudflared from all sources")
     os.chmod(CF, 0o755)
 
 # ---- load FLUX pipeline ----
@@ -3651,9 +3768,23 @@ CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
 # ---- cloudflared binary ----
 CF = "/kaggle/temp/cloudflared"
 if not os.path.exists(CF):
-    subprocess.run(["curl", "-sL", "-o", CF,
-                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
-                   check=True)
+    cf_urls = [
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+        "https://gh-proxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+    ]
+    downloaded = False
+    for u in cf_urls:
+        try:
+            subprocess.run(["curl", "-4", "-fSL", "--connect-timeout", "10", "--max-time", "120",
+                            "--retry", "2", "--retry-delay", "2",
+                            "-o", CF, u],
+                           check=True)
+            downloaded = True
+            break
+        except Exception as e:
+            print(f"Failed downloading cloudflared from {u}: {e}", flush=True)
+    if not downloaded:
+        raise RuntimeError("Failed to download cloudflared from all sources")
     os.chmod(CF, 0o755)
 
 # ---- load model ----
@@ -4189,9 +4320,23 @@ CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
 # ---- cloudflared binary ----
 CF = "/kaggle/temp/cloudflared"
 if not os.path.exists(CF):
-    subprocess.run(["curl", "-sL", "-o", CF,
-                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
-                   check=True)
+    cf_urls = [
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+        "https://gh-proxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+    ]
+    downloaded = False
+    for u in cf_urls:
+        try:
+            subprocess.run(["curl", "-4", "-fSL", "--connect-timeout", "10", "--max-time", "120",
+                            "--retry", "2", "--retry-delay", "2",
+                            "-o", CF, u],
+                           check=True)
+            downloaded = True
+            break
+        except Exception as e:
+            print(f"Failed downloading cloudflared from {u}: {e}", flush=True)
+    if not downloaded:
+        raise RuntimeError("Failed to download cloudflared from all sources")
     os.chmod(CF, 0o755)
 
 # ---- load Ming-3.0-TTS ----
@@ -4764,9 +4909,23 @@ CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
 # ---- cloudflared binary ----
 CF = "/kaggle/temp/cloudflared"
 if not os.path.exists(CF):
-    subprocess.run(["curl", "-sL", "-o", CF,
-                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
-                   check=True)
+    cf_urls = [
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+        "https://gh-proxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+    ]
+    downloaded = False
+    for u in cf_urls:
+        try:
+            subprocess.run(["curl", "-4", "-fSL", "--connect-timeout", "10", "--max-time", "120",
+                            "--retry", "2", "--retry-delay", "2",
+                            "-o", CF, u],
+                           check=True)
+            downloaded = True
+            break
+        except Exception as e:
+            print(f"Failed downloading cloudflared from {u}: {e}", flush=True)
+    if not downloaded:
+        raise RuntimeError("Failed to download cloudflared from all sources")
     os.chmod(CF, 0o755)
 
 # ---- load SenseNova-Loop-9B ----
@@ -5517,9 +5676,23 @@ CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
 # ---- cloudflared binary ----
 CF = "/kaggle/temp/cloudflared"
 if not os.path.exists(CF):
-    subprocess.run(["curl", "-sL", "-o", CF,
-                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
-                   check=True)
+    cf_urls = [
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+        "https://gh-proxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+    ]
+    downloaded = False
+    for u in cf_urls:
+        try:
+            subprocess.run(["curl", "-4", "-fSL", "--connect-timeout", "10", "--max-time", "120",
+                            "--retry", "2", "--retry-delay", "2",
+                            "-o", CF, u],
+                           check=True)
+            downloaded = True
+            break
+        except Exception as e:
+            print(f"Failed downloading cloudflared from {u}: {e}", flush=True)
+    if not downloaded:
+        raise RuntimeError("Failed to download cloudflared from all sources")
     os.chmod(CF, 0o755)
 
 # ---- load model ----
@@ -6083,9 +6256,23 @@ CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
 # ---- cloudflared binary ----
 CF = "/kaggle/temp/cloudflared"
 if not os.path.exists(CF):
-    subprocess.run(["curl", "-sL", "-o", CF,
-                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
-                   check=True)
+    cf_urls = [
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+        "https://gh-proxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+    ]
+    downloaded = False
+    for u in cf_urls:
+        try:
+            subprocess.run(["curl", "-4", "-fSL", "--connect-timeout", "10", "--max-time", "120",
+                            "--retry", "2", "--retry-delay", "2",
+                            "-o", CF, u],
+                           check=True)
+            downloaded = True
+            break
+        except Exception as e:
+            print(f"Failed downloading cloudflared from {u}: {e}", flush=True)
+    if not downloaded:
+        raise RuntimeError("Failed to download cloudflared from all sources")
     os.chmod(CF, 0o755)
 
 # ---- load model ----
