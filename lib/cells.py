@@ -392,7 +392,7 @@ if AUTH_ENABLED:
                                 self.send_header(k, v)
                         self.end_headers()
                         while True:
-                            chunk = r.read(4096)
+                            chunk = r.read1(4096) if hasattr(r, "read1") else r.read(4096)
                             if not chunk: break
                             self.wfile.write(chunk)
                             self.wfile.flush()
@@ -466,11 +466,13 @@ if AUTH_ENABLED:
             try:
                 with resp:
                     while True:
-                        chunk = resp.read(4096)
+                        chunk = resp.read1(4096) if hasattr(resp, "read1") else resp.readline()
                         if not chunk:
                             break
                         self.wfile.write(chunk)
                         self.wfile.flush()
+                        if b"data: [DONE]" in chunk:
+                            break
             except Exception:
                 # Client disconnected mid-generation: erase slot in llama-server immediately
                 try:
