@@ -231,6 +231,10 @@ AUTH_ENABLED = bool((AUTH_USER and AUTH_PASS) or AUTH_KEY)
 LLAMA_TARGET_PORT = PORT if not AUTH_ENABLED else (PORT + 2)
 
 # ---- llama-server (OpenAI-compatible) ----
+# Disable P2P and NCCL P2P to prevent multi-GPU PCIe communication deadlocks on Kaggle dual T4
+os.environ["GGML_CUDA_P2P"] = "0"
+os.environ["NCCL_P2P_DISABLE"] = "1"
+
 FLASH_ATTN = "__FLASH_ATTN__" or "on"
 cmd = [LLAMA_SERVER, "-m", model_path, "--jinja", "-ngl", str(NGL),
        "-c", str(CTX), "-np", "1",
@@ -326,27 +330,98 @@ if AUTH_ENABLED:
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len) if content_len > 0 else None
             headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "authorization")}
-            req = urllib.request.Request(f"http://127.0.0.1:{LLAMA_TARGET_PORT}{self.path}",
-                                         data=body, headers=headers, method=method)
-            try:
-                with urllib.request.urlopen(req, timeout=600) as r:
-                    self.send_response(r.status)
-                    for k, v in r.getheaders():
+
+            is_stream = False
+            if body and method == "POST":
+                try:
+                    payload = json.loads(body.decode("utf-8"))
+                    is_stream = bool(payload.get("stream", False))
+                except Exception:
+                    is_stream = False
+
+            if not is_stream:
+                req = urllib.request.Request(f"http://127.0.0.1:{LLAMA_TARGET_PORT}{self.path}",
+                                             data=body, headers=headers, method=method)
+                try:
+                    with urllib.request.urlopen(req, timeout=600) as r:
+                        self.send_response(r.status)
+                        for k, v in r.getheaders():
+                            if k.lower() not in ("transfer-encoding", "content-length"):
+                                self.send_header(k, v)
+                        self.end_headers()
+                        while True:
+                            chunk = r.read(4096)
+                            if not chunk: break
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                except urllib.error.HTTPError as e:
+                    self.send_response(e.code)
+                    for k, v in e.headers.items():
                         if k.lower() not in ("transfer-encoding", "content-length"):
                             self.send_header(k, v)
                     self.end_headers()
+                    self.wfile.write(e.read())
+                except Exception as e:
+                    self.send_response(502)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": str(e)}).encode())
+                return
+
+            # Streaming request: send SSE headers immediately to prevent Cloudflare 100s timeout
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.flush()
+
+            fetch_res = [None, None]
+            fetch_done = threading.Event()
+
+            def _fetch_stream():
+                try:
+                    req = urllib.request.Request(f"http://127.0.0.1:{LLAMA_TARGET_PORT}{self.path}",
+                                                 data=body, headers=headers, method=method)
+                    fetch_res[0] = urllib.request.urlopen(req, timeout=1200)
+                except Exception as ex:
+                    fetch_res[1] = ex
+                finally:
+                    fetch_done.set()
+
+            threading.Thread(target=_fetch_stream, daemon=True).start()
+
+            # Heartbeat loop: emit SSE comment ": ping\n\n" every 15s while llama-server prefills prompt
+            while not fetch_done.wait(timeout=15):
+                try:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                except Exception:
+                    return
+
+            resp, err = fetch_res[0], fetch_res[1]
+            if err is not None:
+                try:
+                    msg = str(err)
+                    err_json = json.dumps({"error": {"message": msg, "type": "server_error"}}).encode()
+                    self.wfile.write(b"data: " + err_json + b"\n\ndata: [DONE]\n\n")
+                    self.wfile.flush()
+                except Exception:
+                    pass
+                return
+
+            try:
+                with resp:
                     while True:
-                        chunk = r.read(4096)
-                        if not chunk: break
+                        chunk = resp.read(4096)
+                        if not chunk:
+                            break
                         self.wfile.write(chunk)
                         self.wfile.flush()
-            except urllib.error.HTTPError as e:
-                self.send_response(e.code)
-                for k, v in e.headers.items():
-                    if k.lower() not in ("transfer-encoding", "content-length"):
-                        self.send_header(k, v)
-                self.end_headers()
-                self.wfile.write(e.read())
+            except Exception:
+                pass
 
     proxy = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), AuthProxy)
     threading.Thread(target=proxy.serve_forever, daemon=True).start()

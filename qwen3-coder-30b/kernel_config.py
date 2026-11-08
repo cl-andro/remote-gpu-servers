@@ -21,7 +21,7 @@ CFG = {
     "__NGL__": "99",
     "__SPLIT_MODE__": "layer",
     "__FLASH_ATTN__": "off",     # disable FA on dual T4 to avoid MoE multi-batch CUDA sync deadlock
-    "__EXTRA_ARGS__": "-ctk q8_0 -ctv q8_0 -b 512 -ub 128",
+    "__EXTRA_ARGS__": "-ctk q8_0 -ctv q8_0 -b 512 -ub 512",
 
     # --- networking ---
     "__PORT__": "8080",
