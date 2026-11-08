@@ -231,9 +231,12 @@ AUTH_ENABLED = bool((AUTH_USER and AUTH_PASS) or AUTH_KEY)
 LLAMA_TARGET_PORT = PORT if not AUTH_ENABLED else (PORT + 2)
 
 # ---- llama-server (OpenAI-compatible) ----
+FLASH_ATTN = "__FLASH_ATTN__" or "on"
 cmd = [LLAMA_SERVER, "-m", model_path, "--jinja", "-ngl", str(NGL),
-       "-fa", "on", "-c", str(CTX), "-np", "1",
+       "-c", str(CTX), "-np", "1",
        "--host", "127.0.0.1", "--port", str(LLAMA_TARGET_PORT)]
+if FLASH_ATTN.lower() not in ("off", "false", "0") and "-fa" not in EXTRA_ARGS and "--flash-attn" not in EXTRA_ARGS:
+    cmd += ["-fa", FLASH_ATTN]
 # -np 1 keeps the whole context for a single request (llama-server otherwise
 # divides -c across parallel slots, silently shrinking what one generation sees).
 if SPLIT_MODE:

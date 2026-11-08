@@ -36,6 +36,7 @@ DEFAULTS_LLM = {
     "__MMPROJ_FILE__": "", "__MMPROJ_SIZE_GB__": "",
     "__DRAFT_FILE__": "", "__DRAFT_SIZE_GB__": "",
     "__SPLIT_MODE__": "layer", "__EXTRA_ARGS__": "",
+    "__FLASH_ATTN__": "on",
 }
 
 REQUIRED_FLUX = (
