@@ -133,9 +133,9 @@ case "$CMD" in
       URL="$(extract_url "$KERNEL" || true)"
       [[ -n "$URL" ]] && break
 
-      # Check if kernel failed or was cancelled on Kaggle
+      # Check if kernel failed or was cancelled on Kaggle (ignore transitional CANCEL_ACKNOWLEDGED)
       K_STATUS="$(kaggle kernels status "$KERNEL" 2>/dev/null | tail -1 || true)"
-      if [[ "$K_STATUS" =~ [Ee][Rr][Rr][Oo][Rr] || "$K_STATUS" =~ [Cc][Aa][Nn][Cc][Ee][Ll] ]]; then
+      if [[ "$K_STATUS" =~ [Ee][Rr][Rr][Oo][Rr] || "$K_STATUS" =~ \.CANCELL?ED ]]; then
         echo -e "\nKernel failed on Kaggle: $K_STATUS" >&2
         echo "Showing error from kernel log:" >&2
         kaggle kernels output "$KERNEL" 2>/dev/null | tail -n 30 >&2 || true
