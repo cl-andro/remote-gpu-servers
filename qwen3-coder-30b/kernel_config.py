@@ -17,10 +17,10 @@ CFG = {
     "__LLAMA_BUILD__": "b11636",
 
     # --- runtime ---
-    "__CTX__": "65536",          # native max is 262144
+    "__CTX__": "32768",          # 32k context fits comfortably in dual T4 VRAM with KV quantization
     "__NGL__": "99",
     "__SPLIT_MODE__": "layer",
-    "__EXTRA_ARGS__": "",        # Qwen3-Coder is a non-thinking model
+    "__EXTRA_ARGS__": "-ctk q8_0 -ctv q8_0 -b 512 -ub 512",
 
     # --- networking ---
     "__PORT__": "8080",
