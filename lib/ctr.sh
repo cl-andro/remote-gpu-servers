@@ -129,9 +129,19 @@ case "$CMD" in
     rm -f "$URL_FILE" "$STOP_URL_FILE"
     echo "waiting for the tunnel URL (first run downloads the model) ..."
     URL=""
-    for _ in $(seq 1 "${UP_WAIT_TRIES:-90}"); do
+    for i in $(seq 1 "${UP_WAIT_TRIES:-90}"); do
       URL="$(extract_url "$KERNEL" || true)"
       [[ -n "$URL" ]] && break
+
+      # Check if kernel failed or was cancelled on Kaggle
+      K_STATUS="$(kaggle kernels status "$KERNEL" 2>/dev/null | tail -1 || true)"
+      if [[ "$K_STATUS" =~ [Ee][Rr][Rr][Oo][Rr] || "$K_STATUS" =~ [Cc][Aa][Nn][Cc][Ee][Ll] ]]; then
+        echo -e "\nKernel failed on Kaggle: $K_STATUS" >&2
+        echo "Showing error from kernel log:" >&2
+        kaggle kernels output "$KERNEL" 2>/dev/null | tail -n 30 >&2 || true
+        exit 1
+      fi
+
       sleep "${UP_POLL_SECONDS:-20}"
     done
     if [[ -z "$URL" ]]; then

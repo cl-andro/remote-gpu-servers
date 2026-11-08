@@ -100,7 +100,7 @@ draft_path = ensure(MODEL_REPO, DRAFT_FILE, DRAFT_SIZE_GB, "draft")
 
 CELL_3_LLAMA = r'''
 # --- Cell 3: install a prebuilt llama.cpp ----------------------------------
-import os, subprocess, glob
+import os, subprocess, glob, time
 
 LLAMA_BUILD = "__LLAMA_BUILD__"
 LLAMA_DIR = "/kaggle/temp/llama"
@@ -117,9 +117,37 @@ if not llama_server_path():
     # CUDA build first; the cudart archive carries the matching CUDA runtime libs.
     for asset in (f"llama-{LLAMA_BUILD}-bin-ubuntu-cuda-12.8-x64.tar.gz",
                   f"cudart-llama-{LLAMA_BUILD}-bin-ubuntu-cuda-12.8-x64.tar.gz"):
-        subprocess.run(["curl", "-sL", "-o", f"{LLAMA_DIR}/{asset}", f"{BASE}/{asset}"],
-                       check=True)
-        subprocess.run(["tar", "-xzf", f"{LLAMA_DIR}/{asset}", "-C", LLAMA_DIR], check=True)
+        dest = os.path.join(LLAMA_DIR, asset)
+        url = f"{BASE}/{asset}"
+        extracted = False
+        for attempt in range(1, 4):
+            try:
+                print(f"Downloading {asset} (attempt {attempt})...", flush=True)
+                subprocess.run([
+                    "curl", "-fSL", "--retry", "5", "--retry-delay", "3", "--retry-all-errors",
+                    "-A", "Mozilla/5.0 (X11; Linux x86_64)",
+                    "-o", dest, url
+                ], check=True)
+                subprocess.run(["tar", "-xzf", dest, "-C", LLAMA_DIR], check=True)
+                extracted = True
+                break
+            except Exception as e:
+                print(f"Error handling {asset}: {e}", flush=True)
+                if os.path.exists(dest):
+                    try:
+                        with open(dest, "rb") as f:
+                            preview = f.read(200)
+                        print("File preview:", preview, flush=True)
+                    except Exception:
+                        pass
+                    try:
+                        os.remove(dest)
+                    except Exception:
+                        pass
+                if attempt < 3:
+                    time.sleep(3)
+        if not extracted:
+            raise RuntimeError(f"Failed to download and extract {asset} after 3 attempts")
 
 LLAMA_SERVER = llama_server_path()
 if not LLAMA_SERVER:
@@ -156,7 +184,9 @@ CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
 # ---- cloudflared (public URL) ----
 CF = "/kaggle/temp/cloudflared"
 if not os.path.exists(CF):
-    subprocess.run(["curl", "-sL", "-o", CF,
+    subprocess.run(["curl", "-fSL", "--retry", "5", "--retry-delay", "3", "--retry-all-errors",
+                    "-A", "Mozilla/5.0 (X11; Linux x86_64)",
+                    "-o", CF,
                     "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"],
                    check=True)
     os.chmod(CF, 0o755)
