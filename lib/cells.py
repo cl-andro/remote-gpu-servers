@@ -329,6 +329,14 @@ if AUTH_ENABLED:
         def do_POST(self):
             if not self._check_auth(): return
             clean_path = self.path.split("?")[0].rstrip("/")
+            if clean_path in ("/stop", "/v1/stop"):
+                STOP_REQUESTED.set()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok": true, "message": "shutdown requested"}\n')
+                print("STOP_REQUESTED received via auth tunnel", flush=True)
+                return
             if clean_path in ("/reset", "/v1/reset"):
                 global server
                 try:

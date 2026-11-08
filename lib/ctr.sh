@@ -177,6 +177,11 @@ case "$CMD" in
     kaggle kernels logs -f "$KERNEL" 2>/dev/null | pretty
     ;;
   stop)
+    URL="$(cat "$URL_FILE" 2>/dev/null || true)"
+    if [[ -n "$URL" ]]; then
+      echo "Requesting shutdown via main tunnel $URL/stop ..."
+      python3 "$CLIENT" --url "$URL" --model "$MODEL_ALIAS" raw /stop '{}' 2>/dev/null || true
+    fi
     STOP_URL="$(cat "$STOP_URL_FILE" 2>/dev/null || true)"
     if [[ -z "$STOP_URL" ]]; then
       STOP_URL="$(extract_stop_url "$KERNEL" || true)"
