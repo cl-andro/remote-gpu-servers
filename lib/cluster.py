@@ -167,6 +167,16 @@ def cmd_slots(a) -> None:
         print(json.dumps(json.load(r), indent=2))
 
 
+def cmd_reset(a) -> None:
+    url = resolve_url(a.url)
+    req = authed_request(f"{url}/reset", data=b"{}", headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            print(f"{GREEN}{r.status}{RESET} {r.read().decode().strip()}")
+    except Exception as e:
+        sys.exit(f"Failed to reset server: {e}")
+
+
 def build_messages(system: str | None, prompt: str, history: list) -> list:
     msgs = []
     if system:
@@ -543,6 +553,7 @@ def main() -> None:
     sub.add_parser("props", help="server properties / model info").set_defaults(func=cmd_props)
     sub.add_parser("models", help="list models").set_defaults(func=cmd_models)
     sub.add_parser("slots", help="show context slots").set_defaults(func=cmd_slots)
+    sub.add_parser("reset", help="reset/restart llama-server remotely").set_defaults(func=cmd_reset)
 
     sp = sub.add_parser("chat", help="single-shot chat")
     add_common(sp)

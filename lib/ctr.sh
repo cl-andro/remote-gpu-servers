@@ -249,7 +249,7 @@ PY
         "Reply with exactly: CLUSTER ONLINE"
     fi
     ;;
-  chat|stream|repl|tools|health|props|models|slots|tokenize|raw|gen|parse|tts)
+  chat|stream|repl|tools|health|props|models|slots|reset|tokenize|raw|gen|parse|tts)
     # Direct passthrough to the stdlib client (one-shot chat, REPL, image gen, etc.).
     # `$@` already begins with the command name.
     URL="$(cat "$URL_FILE" 2>/dev/null || extract_url "$KERNEL" || true)"

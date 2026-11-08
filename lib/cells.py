@@ -236,8 +236,11 @@ os.environ["GGML_CUDA_P2P"] = "0"
 os.environ["NCCL_P2P_DISABLE"] = "1"
 
 FLASH_ATTN = "__FLASH_ATTN__" or "on"
+SLOTS_DIR = "/kaggle/temp/slots"
+os.makedirs(SLOTS_DIR, exist_ok=True)
 cmd = [LLAMA_SERVER, "-m", model_path, "--jinja", "-ngl", str(NGL),
        "-c", str(CTX), "-np", "1",
+       "--slot-save-path", SLOTS_DIR,
        "--host", "127.0.0.1", "--port", str(LLAMA_TARGET_PORT)]
 if FLASH_ATTN.lower() not in ("off", "false", "0") and "-fa" not in EXTRA_ARGS and "--flash-attn" not in EXTRA_ARGS:
     cmd += ["-fa", FLASH_ATTN]
@@ -324,7 +327,33 @@ if AUTH_ENABLED:
         def do_GET(self):
             if self._check_auth(): self._forward("GET")
         def do_POST(self):
-            if self._check_auth(): self._forward("POST")
+            if not self._check_auth(): return
+            clean_path = self.path.split("?")[0].rstrip("/")
+            if clean_path in ("/reset", "/v1/reset"):
+                global server
+                try:
+                    server.terminate()
+                    server.wait(timeout=5)
+                except Exception:
+                    try: server.kill()
+                    except Exception: pass
+                llm_log_fh = open(LLM_LOG, "a")
+                server = subprocess.Popen(cmd, stdout=llm_log_fh, stderr=subprocess.STDOUT,
+                                          env=os.environ.copy(), cwd=LLAMA_BIN_DIR)
+                for _ in range(60):
+                    time.sleep(1)
+                    try:
+                        with urllib.request.urlopen(f"http://127.0.0.1:{LLAMA_TARGET_PORT}/health", timeout=2) as hr:
+                            if hr.status == 200:
+                                break
+                    except Exception:
+                        pass
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status": "ok", "message": "llama-server restarted cleanly"}\n')
+                return
+            self._forward("POST")
 
         def _forward(self, method):
             content_len = int(self.headers.get("Content-Length", 0))
@@ -399,6 +428,15 @@ if AUTH_ENABLED:
                     self.wfile.write(b": ping\n\n")
                     self.wfile.flush()
                 except Exception:
+                    # Client disconnected: erase slot in llama-server to stop orphaned generation
+                    try:
+                        erase_req = urllib.request.Request(
+                            f"http://127.0.0.1:{LLAMA_TARGET_PORT}/slots/0?action=erase",
+                            data=b"{}", headers={"Content-Type": "application/json"}, method="POST"
+                        )
+                        urllib.request.urlopen(erase_req, timeout=3)
+                    except Exception:
+                        pass
                     return
 
             resp, err = fetch_res[0], fetch_res[1]
@@ -421,7 +459,15 @@ if AUTH_ENABLED:
                         self.wfile.write(chunk)
                         self.wfile.flush()
             except Exception:
-                pass
+                # Client disconnected mid-generation: erase slot in llama-server immediately
+                try:
+                    erase_req = urllib.request.Request(
+                        f"http://127.0.0.1:{LLAMA_TARGET_PORT}/slots/0?action=erase",
+                        data=b"{}", headers={"Content-Type": "application/json"}, method="POST"
+                    )
+                    urllib.request.urlopen(erase_req, timeout=3)
+                except Exception:
+                    pass
 
     proxy = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), AuthProxy)
     threading.Thread(target=proxy.serve_forever, daemon=True).start()
