@@ -171,7 +171,7 @@ def cmd_reset(a) -> None:
     url = resolve_url(a.url)
     req = authed_request(f"{url}/reset", data=b"{}", headers={"Content-Type": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with urllib.request.urlopen(req, timeout=90) as r:
             print(f"{GREEN}{r.status}{RESET} {r.read().decode().strip()}")
     except Exception as e:
         sys.exit(f"Failed to reset server: {e}")

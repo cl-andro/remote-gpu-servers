@@ -174,10 +174,7 @@ if not with_rea:
     # Disable rea during cluster agent runs to prevent 229 MCP tools from inflating system prompts to ~4k tokens
     cfg["mcp"] = {
         "rea": {
-            "type": "local",
-            "command": ["/home/alamgir-zk/.local/bin/rea", "mcp"],
             "enabled": False,
-            "disabled": True,
         }
     }
 

@@ -343,8 +343,13 @@ if AUTH_ENABLED:
                     server.terminate()
                     server.wait(timeout=5)
                 except Exception:
-                    try: server.kill()
-                    except Exception: pass
+                    pass
+                try:
+                    server.kill()
+                    server.wait(timeout=3)
+                except Exception:
+                    pass
+                time.sleep(2)
                 llm_log_fh = open(LLM_LOG, "a")
                 server = subprocess.Popen(cmd, stdout=llm_log_fh, stderr=subprocess.STDOUT,
                                           env=os.environ.copy(), cwd=LLAMA_BIN_DIR)

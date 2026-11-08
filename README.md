@@ -137,6 +137,7 @@ cp .env.example .env                 # paste your Kaggle token into .env
 ./bin/cluster qwen3-coder-30b test   # health check + sample chat
 ./bin/cluster qwen3-coder-30b agent  # use it as an agent (opencode)
 ./bin/cluster qwen3-coder-30b stop   # end the session, free the GPU
+./bin/cluster qwen3-coder-30b agent --with-rea # with REA activate session command
 ```
 
 Prefer the low-level driver? Every project has its own wrapper:

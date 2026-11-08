@@ -177,31 +177,32 @@ case "$CMD" in
     kaggle kernels logs -f "$KERNEL" 2>/dev/null | pretty
     ;;
   stop)
+    STOPPED="false"
     URL="$(cat "$URL_FILE" 2>/dev/null || true)"
     if [[ -n "$URL" ]]; then
       echo "Requesting shutdown via main tunnel $URL/stop ..."
-      python3 "$CLIENT" --url "$URL" --model "$MODEL_ALIAS" raw /stop '{}' 2>/dev/null || true
+      if python3 "$CLIENT" --url "$URL" --model "$MODEL_ALIAS" raw /stop '{}' 2>/dev/null; then
+        STOPPED="true"
+      fi
     fi
-    STOP_URL="$(cat "$STOP_URL_FILE" 2>/dev/null || true)"
-    if [[ -z "$STOP_URL" ]]; then
-      STOP_URL="$(extract_stop_url "$KERNEL" || true)"
-      [[ -n "$STOP_URL" ]] && echo "$STOP_URL" > "$STOP_URL_FILE"
-    fi
-    if [[ -z "$STOP_URL" ]]; then
-      echo "could not find STOP_URL. Is the run live? Try: ./bin/cluster $(basename "$PROJECT") stop-url" >&2
-      echo "Fallback: https://www.kaggle.com/code/$KERNEL -> Stop Session" >&2
-      exit 1
-    fi
-    echo "Requesting shutdown via $STOP_URL ..."
-    python3 - "$STOP_URL" <<'PY'
+    if [[ "$STOPPED" != "true" ]]; then
+      STOP_URL="$(cat "$STOP_URL_FILE" 2>/dev/null || true)"
+      if [[ -z "$STOP_URL" ]]; then
+        STOP_URL="$(extract_stop_url "$KERNEL" || true)"
+        [[ -n "$STOP_URL" ]] && echo "$STOP_URL" > "$STOP_URL_FILE"
+      fi
+      if [[ -n "$STOP_URL" ]]; then
+        echo "Requesting shutdown via control tunnel $STOP_URL ..."
+        python3 - "$STOP_URL" <<'PY' || true
 import sys, urllib.request
 try:
     with urllib.request.urlopen(sys.argv[1], timeout=60) as r:
         print(r.read().decode().strip() or f"HTTP {r.status}")
 except Exception as e:
-    print("stop request failed:", e)
-    raise SystemExit(1)
+    print("stop request via control tunnel:", e)
 PY
+      fi
+    fi
     echo "Waiting for the kernel to stop (this can take a few minutes) ..."
     STATE=""
     for _ in $(seq 1 "${STOP_WAIT_TRIES:-40}"); do
