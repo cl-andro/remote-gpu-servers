@@ -177,7 +177,7 @@ print(subprocess.run([LLAMA_SERVER, "--version"], capture_output=True, text=True
 
 CELL_4_SERVE = r'''
 # --- Cell 4: start llama-server + publish public tunnels -------------------
-import os, re, subprocess, time, urllib.request, json, threading, http.server
+import os, re, subprocess, time, urllib.request, json, threading, http.server, socket
 
 PORT = int("__PORT__")
 CTL_PORT = int("__CTL_PORT__")
@@ -414,6 +414,10 @@ if AUTH_ENABLED:
                     self.wfile.write(json.dumps({"error": str(e)}).encode())
                 finally:
                     self.close_connection = True
+                    try:
+                        self.connection.shutdown(socket.SHUT_WR)
+                    except Exception:
+                        pass
                 return
 
             # Streaming request: send SSE headers immediately to prevent Cloudflare 100s timeout
@@ -492,6 +496,10 @@ if AUTH_ENABLED:
                     pass
             finally:
                 self.close_connection = True
+                try:
+                    self.connection.shutdown(socket.SHUT_WR)
+                except Exception:
+                    pass
 
     proxy = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), AuthProxy)
     threading.Thread(target=proxy.serve_forever, daemon=True).start()
