@@ -235,6 +235,8 @@ LLAMA_TARGET_PORT = PORT if not AUTH_ENABLED else (PORT + 2)
 # On Kaggle dual Tesla T4s without NVLink, P2P causes silent PCIe deadlocks during multi-GPU layer execution.
 os.environ.pop("GGML_CUDA_P2P", None)
 os.environ["NCCL_P2P_DISABLE"] = "1"
+# Disable CUDA Graphs: dynamic MoE routing across dual GPUs causes graph capture deadlocks during prefill.
+os.environ["GGML_CUDA_DISABLE_GRAPHS"] = "1"
 
 FLASH_ATTN = "__FLASH_ATTN__" or "on"
 SLOTS_DIR = "/kaggle/temp/slots"

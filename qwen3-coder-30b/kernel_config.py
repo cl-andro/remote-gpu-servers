@@ -21,7 +21,7 @@ CFG = {
     "__NGL__": "99",
     "__SPLIT_MODE__": "layer",
     "__FLASH_ATTN__": "on",
-    "__EXTRA_ARGS__": "-b 8192 -ub 4096 -ts 1,1",
+    "__EXTRA_ARGS__": "-b 1024 -ub 1024 -ts 1,1 --no-mmap",
 
     # --- networking ---
     "__PORT__": "8080",
