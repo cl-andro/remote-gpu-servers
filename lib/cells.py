@@ -231,8 +231,9 @@ AUTH_ENABLED = bool((AUTH_USER and AUTH_PASS) or AUTH_KEY)
 LLAMA_TARGET_PORT = PORT if not AUTH_ENABLED else (PORT + 2)
 
 # ---- llama-server (OpenAI-compatible) ----
-# Disable P2P and NCCL P2P to prevent multi-GPU PCIe communication deadlocks on Kaggle dual T4
-os.environ["GGML_CUDA_P2P"] = "0"
+# Disable P2P: llama.cpp enables P2P if GGML_CUDA_P2P is present in the environment (even "0").
+# On Kaggle dual Tesla T4s without NVLink, P2P causes silent PCIe deadlocks during multi-GPU layer execution.
+os.environ.pop("GGML_CUDA_P2P", None)
 os.environ["NCCL_P2P_DISABLE"] = "1"
 
 FLASH_ATTN = "__FLASH_ATTN__" or "on"
@@ -371,7 +372,7 @@ if AUTH_ENABLED:
         def _forward(self, method):
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len) if content_len > 0 else None
-            headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "authorization")}
+            headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "authorization", "accept-encoding", "content-length")}
 
             is_stream = False
             if body and method == "POST":
@@ -388,8 +389,9 @@ if AUTH_ENABLED:
                     with urllib.request.urlopen(req, timeout=600) as r:
                         self.send_response(r.status)
                         for k, v in r.getheaders():
-                            if k.lower() not in ("transfer-encoding", "content-length"):
+                            if k.lower() not in ("transfer-encoding", "content-length", "connection"):
                                 self.send_header(k, v)
+                        self.send_header("Connection", "close")
                         self.end_headers()
                         while True:
                             chunk = r.read1(4096) if hasattr(r, "read1") else r.read(4096)
@@ -399,22 +401,26 @@ if AUTH_ENABLED:
                 except urllib.error.HTTPError as e:
                     self.send_response(e.code)
                     for k, v in e.headers.items():
-                        if k.lower() not in ("transfer-encoding", "content-length"):
+                        if k.lower() not in ("transfer-encoding", "content-length", "connection"):
                             self.send_header(k, v)
+                    self.send_header("Connection", "close")
                     self.end_headers()
                     self.wfile.write(e.read())
                 except Exception as e:
                     self.send_response(502)
                     self.send_header("Content-Type", "application/json")
+                    self.send_header("Connection", "close")
                     self.end_headers()
                     self.wfile.write(json.dumps({"error": str(e)}).encode())
+                finally:
+                    self.close_connection = True
                 return
 
             # Streaming request: send SSE headers immediately to prevent Cloudflare 100s timeout
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
+            self.send_header("Connection", "close")
             self.send_header("X-Accel-Buffering", "no")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
@@ -461,6 +467,7 @@ if AUTH_ENABLED:
                     self.wfile.flush()
                 except Exception:
                     pass
+                self.close_connection = True
                 return
 
             try:
@@ -483,6 +490,8 @@ if AUTH_ENABLED:
                     urllib.request.urlopen(erase_req, timeout=3)
                 except Exception:
                     pass
+            finally:
+                self.close_connection = True
 
     proxy = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), AuthProxy)
     threading.Thread(target=proxy.serve_forever, daemon=True).start()
