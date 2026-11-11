@@ -238,15 +238,19 @@ os.environ["NCCL_P2P_DISABLE"] = "1"
 # Disable CUDA Graphs: dynamic MoE routing across dual GPUs causes graph capture deadlocks during prefill.
 os.environ["GGML_CUDA_DISABLE_GRAPHS"] = "1"
 
-FLASH_ATTN = "__FLASH_ATTN__" or "on"
+FLASH_ATTN = "__FLASH_ATTN__" or "off"
 SLOTS_DIR = "/kaggle/temp/slots"
 os.makedirs(SLOTS_DIR, exist_ok=True)
 cmd = [LLAMA_SERVER, "-m", model_path, "--jinja", "-ngl", str(NGL),
        "-c", str(CTX), "-np", "1",
        "--slot-save-path", SLOTS_DIR,
        "--host", "127.0.0.1", "--port", str(LLAMA_TARGET_PORT)]
-if FLASH_ATTN.lower() not in ("off", "false", "0") and "-fa" not in EXTRA_ARGS and "--flash-attn" not in EXTRA_ARGS:
+if "-fa" not in EXTRA_ARGS and "--flash-attn" not in EXTRA_ARGS and FLASH_ATTN:
     cmd += ["-fa", FLASH_ATTN]
+if "-b" not in EXTRA_ARGS and "--batch-size" not in EXTRA_ARGS:
+    cmd += ["-b", "512"]
+if "-ub" not in EXTRA_ARGS and "--ubatch-size" not in EXTRA_ARGS:
+    cmd += ["-ub", "512"]
 # -np 1 keeps the whole context for a single request (llama-server otherwise
 # divides -c across parallel slots, silently shrinking what one generation sees).
 if SPLIT_MODE:

@@ -20,7 +20,8 @@ CFG = {
     "__CTX__": "32768",
     "__NGL__": "99",
     "__SPLIT_MODE__": "layer",
-    "__EXTRA_ARGS__": "",
+    "__EXTRA_ARGS__": "-b 512 -ub 512",
+    "__FLASH_ATTN__": "off",
 
     # --- networking ---
     "__PORT__": "8080",
