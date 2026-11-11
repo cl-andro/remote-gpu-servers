@@ -251,6 +251,10 @@ if FLASH_ATTN.lower() not in ("off", "false", "0") and "-fa" not in EXTRA_ARGS a
 # divides -c across parallel slots, silently shrinking what one generation sees).
 if SPLIT_MODE:
     cmd += ["--split-mode", SPLIT_MODE]
+    if "--tensor-split" not in EXTRA_ARGS and "-ts" not in EXTRA_ARGS:
+        cmd += ["--tensor-split", "1,1"]
+if "--cache-reuse" not in EXTRA_ARGS:
+    cmd += ["--cache-reuse", "256"]
 if mmproj_path:
     cmd += ["--mmproj", mmproj_path]
 if draft_path:
@@ -453,15 +457,7 @@ if AUTH_ENABLED:
                     self.wfile.write(b": ping\n\n")
                     self.wfile.flush()
                 except Exception:
-                    # Client disconnected: erase slot in llama-server to stop orphaned generation
-                    try:
-                        erase_req = urllib.request.Request(
-                            f"http://127.0.0.1:{LLAMA_TARGET_PORT}/slots/0?action=erase",
-                            data=b"{}", headers={"Content-Type": "application/json"}, method="POST"
-                        )
-                        urllib.request.urlopen(erase_req, timeout=3)
-                    except Exception:
-                        pass
+                    # Client disconnected: retain prompt cache so subsequent requests reuse prefilled tokens
                     return
 
             resp, err = fetch_res[0], fetch_res[1]
