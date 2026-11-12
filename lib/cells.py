@@ -169,7 +169,22 @@ if not LLAMA_SERVER:
 
 os.chmod(LLAMA_SERVER, 0o755)
 LLAMA_BIN_DIR = os.path.dirname(LLAMA_SERVER)
-os.environ["LD_LIBRARY_PATH"] = LLAMA_BIN_DIR + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+
+# Link all shared libraries (including cudart/cublas) into LLAMA_BIN_DIR
+for so_file in glob.glob(os.path.join(LLAMA_DIR, "**", "*.so*"), recursive=True):
+    dest_so = os.path.join(LLAMA_BIN_DIR, os.path.basename(so_file))
+    if not os.path.exists(dest_so):
+        try:
+            os.symlink(so_file, dest_so)
+        except Exception:
+            try:
+                subprocess.run(["cp", "-a", so_file, dest_so], check=True)
+            except Exception:
+                pass
+
+all_lib_dirs = {os.path.dirname(p) for p in glob.glob(os.path.join(LLAMA_DIR, "**", "*.so*"), recursive=True)}
+all_lib_dirs.add(LLAMA_BIN_DIR)
+os.environ["LD_LIBRARY_PATH"] = ":".join(all_lib_dirs) + ":" + os.environ.get("LD_LIBRARY_PATH", "")
 
 print("llama-server:", LLAMA_SERVER)
 print(subprocess.run([LLAMA_SERVER, "--version"], capture_output=True, text=True).stdout)
@@ -260,7 +275,15 @@ if "-ub" not in EXTRA_ARGS and "--ubatch-size" not in EXTRA_ARGS:
     cmd += ["-ub", "512"]
 # -np 1 keeps the whole context for a single request (llama-server otherwise
 # divides -c across parallel slots, silently shrinking what one generation sees).
-if SPLIT_MODE:
+env = os.environ.copy()
+all_lib_dirs = {os.path.dirname(p) for p in glob.glob(os.path.join(LLAMA_DIR, "**", "*.so*"), recursive=True)}
+all_lib_dirs.add(LLAMA_BIN_DIR)
+env["LD_LIBRARY_PATH"] = ":".join(all_lib_dirs) + ":" + env.get("LD_LIBRARY_PATH", "")
+
+if SPLIT_MODE == "none":
+    cmd += ["--split-mode", "none", "--main-gpu", "0"]
+    env["CUDA_VISIBLE_DEVICES"] = "0"
+elif SPLIT_MODE:
     cmd += ["--split-mode", SPLIT_MODE]
     if "--tensor-split" not in EXTRA_ARGS and "-ts" not in EXTRA_ARGS:
         cmd += ["--tensor-split", "1,1"]
@@ -275,7 +298,7 @@ print("launching:", " ".join(cmd), flush=True)
 
 llm_log_fh = open(LLM_LOG, "w")
 server = subprocess.Popen(cmd, stdout=llm_log_fh, stderr=subprocess.STDOUT,
-                          env=os.environ.copy(), cwd=LLAMA_BIN_DIR)
+                          env=env, cwd=LLAMA_BIN_DIR)
 
 # ---- wait for readiness ----
 ready = False
@@ -356,7 +379,21 @@ if AUTH_ENABLED:
         def do_HEAD(self):
             if self._check_auth(): self._forward("HEAD")
         def do_GET(self):
-            if self._check_auth(): self._forward("GET")
+            if not self._check_auth(): return
+            clean_path = self.path.split("?")[0].rstrip("/")
+            if clean_path in ("/log", "/v1/log"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                try:
+                    with open(LLM_LOG, "rb") as f:
+                        f.seek(max(0, os.path.getsize(LLM_LOG) - 100000))
+                        self.wfile.write(f.read())
+                except Exception as e:
+                    self.wfile.write(f"Error reading log: {e}\n".encode())
+                return
+            self._forward("GET")
         def do_POST(self):
             if not self._check_auth(): return
             clean_path = self.path.split("?")[0].rstrip("/")
@@ -383,7 +420,7 @@ if AUTH_ENABLED:
                 time.sleep(2)
                 llm_log_fh = open(LLM_LOG, "a")
                 server = subprocess.Popen(cmd, stdout=llm_log_fh, stderr=subprocess.STDOUT,
-                                          env=os.environ.copy(), cwd=LLAMA_BIN_DIR)
+                                          env=env, cwd=LLAMA_BIN_DIR)
                 for _ in range(60):
                     time.sleep(1)
                     try:
@@ -483,7 +520,15 @@ if AUTH_ENABLED:
                     self.wfile.write(b": ping\n\n")
                     self.wfile.flush()
                 except Exception:
-                    # Client disconnected: retain prompt cache so subsequent requests reuse prefilled tokens
+                    # Client disconnected: erase slot to abort background generation immediately
+                    try:
+                        erase_req = urllib.request.Request(
+                            f"http://127.0.0.1:{LLAMA_TARGET_PORT}/slots/0?action=erase",
+                            data=b"{}", headers={"Content-Type": "application/json"}, method="POST"
+                        )
+                        urllib.request.urlopen(erase_req, timeout=3)
+                    except Exception:
+                        pass
                     return
 
             resp, err = fetch_res[0], fetch_res[1]

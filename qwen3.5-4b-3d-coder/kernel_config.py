@@ -14,7 +14,7 @@ CFG = {
     "__NGL__": "99",
     "__SPLIT_MODE__": "none",
     "__FLASH_ATTN__": "on",
-    "__EXTRA_ARGS__": "-b 2048 -ub 2048 -ctk q8_0 -ctv q8_0",
+    "__EXTRA_ARGS__": "-b 2048 -ub 1024",
     "__PORT__": "8080",
     "__CTL_PORT__": "8081",
     "__SERVE_MINUTES__": "660",
