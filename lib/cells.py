@@ -245,6 +245,13 @@ cmd = [LLAMA_SERVER, "-m", model_path, "--jinja", "-ngl", str(NGL),
        "-c", str(CTX), "-np", "1",
        "--slot-save-path", SLOTS_DIR,
        "--host", "127.0.0.1", "--port", str(LLAMA_TARGET_PORT)]
+MODEL_ALIAS = "__MODEL_ALIAS__"
+if MODEL_ALIAS and "-a" not in EXTRA_ARGS and "--alias" not in EXTRA_ARGS:
+    aliases = [a.strip() for a in MODEL_ALIAS.split(",") if a.strip()]
+    model_base = os.path.splitext(os.path.basename(model_path))[0]
+    if model_base not in aliases:
+        aliases.append(model_base)
+    cmd += ["--alias", ",".join(aliases)]
 if "-fa" not in EXTRA_ARGS and "--flash-attn" not in EXTRA_ARGS and FLASH_ATTN:
     cmd += ["-fa", FLASH_ATTN]
 if "-b" not in EXTRA_ARGS and "--batch-size" not in EXTRA_ARGS:
@@ -382,7 +389,7 @@ if AUTH_ENABLED:
         def _forward(self, method):
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len) if content_len > 0 else None
-            headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "authorization", "accept-encoding", "content-length")}
+            headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "authorization", "content-length")}
 
             is_stream = False
             if body and method == "POST":

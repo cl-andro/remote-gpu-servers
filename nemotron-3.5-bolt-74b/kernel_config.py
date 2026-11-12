@@ -11,7 +11,7 @@ CFG = {
     "__MODEL_REPO__": "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF",
     "__MODEL_FILE__": "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf",
     "__MODEL_SIZE_GB__": "20.51",
-    "__MODEL_ALIAS__": "nemotron-3.5-bolt",
+    "__MODEL_ALIAS__": "nemotron-3.5-bolt,nemotron-3.5-bolt-74b,NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB",
 
     # --- llama.cpp (b12174+ required for Nemotron-3.5 Mamba2-Transformer MoE) ---
     "__LLAMA_BUILD__": "b12174",
@@ -20,8 +20,8 @@ CFG = {
     "__CTX__": "32768",
     "__NGL__": "99",
     "__SPLIT_MODE__": "layer",
-    "__EXTRA_ARGS__": "-b 512 -ub 512",
-    "__FLASH_ATTN__": "off",
+    "__EXTRA_ARGS__": "-b 512 -ub 512 -ctk q8_0 -ctv q8_0",
+    "__FLASH_ATTN__": "on",
 
     # --- networking ---
     "__PORT__": "8080",
