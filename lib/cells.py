@@ -302,6 +302,19 @@ if not ready:
 
 print("llama-server is UP on port", LLAMA_TARGET_PORT, flush=True)
 
+print("\n--- GPU & LLAMA-SERVER STARTUP REPORT ---", flush=True)
+try:
+    log_content = open(LLM_LOG).read()
+    for l in log_content.splitlines():
+        if any(k in l.lower() for k in ("cuda", "device", "offload", "layer", "vram", "buffer", "tensor_split", "mamba", "load_model")):
+            print("  " + l, flush=True)
+except Exception as e:
+    print(f"Failed reading LLM_LOG summary: {e}", flush=True)
+
+print("--- INITIAL NVIDIA-SMI VRAM USAGE ---", flush=True)
+print(subprocess.run(["nvidia-smi", "--query-gpu=index,name,memory.used,memory.total,utilization.gpu", "--format=csv"],
+                     capture_output=True, text=True).stdout or "no nvidia-smi", flush=True)
+
 # ---- authenticating reverse proxy (if auth enabled) ----
 if AUTH_ENABLED:
     import base64
@@ -423,6 +436,8 @@ if AUTH_ENABLED:
                     self.send_header("Connection", "close")
                     self.end_headers()
                     self.wfile.write(e.read())
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
                 except Exception as e:
                     self.send_response(502)
                     self.send_header("Content-Type", "application/json")
@@ -648,6 +663,13 @@ for minute in range(SERVE_MINUTES):
     if minute % 5 == 0:
         # Re-print periodically so the URL can always be recovered from logs.
         print(f"[{minute}m] health={status} CONTROL_URL={url}", flush=True)
+        try:
+            gpu_stats = subprocess.run(["nvidia-smi", "--query-gpu=index,name,memory.used,memory.total,utilization.gpu", "--format=csv,noheader"],
+                                       capture_output=True, text=True).stdout.strip()
+            for line in gpu_stats.splitlines():
+                print(f"  [GPU {line.strip()}]", flush=True)
+        except Exception:
+            pass
 
 print("SERVE_WINDOW_COMPLETE", flush=True)
 '''

@@ -20,7 +20,7 @@ CFG = {
     "__CTX__": "32768",
     "__NGL__": "99",
     "__SPLIT_MODE__": "layer",
-    "__EXTRA_ARGS__": "-b 512 -ub 512 -ctk q8_0 -ctv q8_0",
+    "__EXTRA_ARGS__": "-b 512 -ub 512 -ctk q8_0 -ctv q8_0 --tensor-split 10,12",
     "__FLASH_ATTN__": "on",
 
     # --- networking ---
