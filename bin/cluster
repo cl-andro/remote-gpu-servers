@@ -150,6 +150,15 @@ CFG = k.CFG
 alias = CFG.get("__MODEL_ALIAS__", "model")
 name = CFG.get("__PROJECT_NAME__", alias)
 ctx = int(CFG.get("__CTX__", "32768"))
+
+# llama-server's -c is prompt + generation combined. If the client believes the
+# whole window is prompt space it will ask for a full max_tokens on top and get
+# a hard `exceed_context_size_error`. Reserve the output budget up front.
+output = int(os.environ.get("CLUSTER_MAX_OUTPUT") or min(8192, max(2048, ctx // 4)))
+usable = max(2048, ctx - output - 512)   # 512-token safety margin for tokenizer drift
+keep = int(os.environ.get("CLUSTER_COMPACT_KEEP") or max(2000, min(15000, usable // 4)))
+buffer = os.environ.get("CLUSTER_COMPACT_BUFFER") or "20%"
+
 api_key = os.environ.get("CLUSTER_API_KEY") or os.environ.get("CLUSTER_AUTH_PASS") or ""
 cfg = {
     "$schema": "https://opencode.ai/config.json",
@@ -162,13 +171,30 @@ cfg = {
                 alias: {
                     "id": alias,
                     "name": f"{name} (Kaggle GPU)",
-                    "limit": {"context": ctx, "output": 8192},
+                    "limit": {"context": usable, "output": output},
                 }
             },
         }
     },
     "model": f"cluster/{alias}",
+    # Keep the session alive past the window: summarize older turns, keep the
+    # recent ones verbatim. Tuned for the server's real -c budget.
+    "compaction": {
+        "auto": True,
+        "keep": {"tokens": keep},
+        "buffer": buffer,
+    },
 }
+
+# Small windows pause the session while the summary is generated. On a 32k
+# model that is ~1-2 minutes of prefill, so prepare the summary in the
+# background instead (OpenCode marks this experimental).
+if ctx <= 65536 and os.environ.get("CLUSTER_BG_COMPACTION", "1") != "0":
+    cfg["experimental"] = {"background_compaction": True}
+
+compact_model = os.environ.get("CLUSTER_COMPACT_MODEL")
+if compact_model:
+    cfg.setdefault("agents", {})["compaction"] = {"model": compact_model}
 
 if not with_rea:
     # Disable rea during cluster agent runs to prevent 229 MCP tools from inflating system prompts to ~4k tokens
@@ -187,7 +213,10 @@ with open(proj_cfg, "w") as f:
     json.dump(cfg, f, indent=2)
 
 mcp_status = "enabled (--with-rea)" if with_rea else "automatically disabled (prompt prefill fast ~15s)"
-print(f"wrote {out}\n  baseURL {cfg['provider']['cluster']['options']['baseURL']}\n  model   cluster/{alias}\n  mcp     rea {mcp_status}")
+print(f"wrote {out}\n  baseURL {cfg['provider']['cluster']['options']['baseURL']}\n  model   cluster/{alias}\n"
+      f"  context {usable} prompt + {output} output (server -c {ctx})\n"
+      f"  compact at {buffer} free, keep {keep} recent tokens\n"
+      f"  mcp     rea {mcp_status}")
 PY
 
 opencode reload >/dev/null 2>&1 || true

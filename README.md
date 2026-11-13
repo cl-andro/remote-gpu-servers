@@ -229,6 +229,90 @@ layers, per-GPU buffer sizes, flash-attention and allocation errors.
    RTT through Cloudflare; judge speed with `bench` (server timings), not by
    watching the agent stream.
 
+## Context limits, overflow errors, and compaction
+
+llama-server's `-c` is the **whole** window: prompt **plus** generated tokens. A
+client that treats `-c` as prompt space and then asks for 8k more output gets a
+hard failure:
+
+```json
+{"error":{"code":400,"type":"exceed_context_size_error",
+          "message":"the request exceeds the available context size, try increasing it"}}
+```
+
+`bin/cluster … agent` now writes a budget-aware OpenCode config, so a 32k server
+looks like this instead of 32k-of-prompt:
+
+| Piece | Tokens | Where |
+| --- | ---: | --- |
+| fixed system prompt + skills + tool schemas | 4–8k | compaction cannot shrink this |
+| conversation (older turns → summary) | ≤ 6k kept verbatim | `compaction.keep.tokens` |
+| generation | 8k | `limit.output` |
+| safety margin | 512 | reserved |
+| **prompt budget** | **~24k** | `limit.context` |
+
+Automatic compaction is enabled (`compaction.auto`), triggers with 20% free
+(`compaction.buffer`) and, on small windows, prepares the summary in the
+background so the session does not stall for a minute of prefill.
+
+> **Check your global config.** A `~/.config/opencode/opencode.jsonc` containing
+> the V1 pair `"compaction": {"auto": false, "prune": true}` disables summaries
+> everywhere and is a common cause of "context window exceeded" errors, because
+> V2 ignores `prune`. The generated project config now sets `compaction.auto`
+> explicitly, so it overrides that; removing `prune` and setting `auto: true`
+> globally is still the cleaner fix.
+
+Tune it without editing the script:
+
+```bash
+CLUSTER_MAX_OUTPUT=4096   ./bin/cluster <project> agent   # smaller replies, more history
+CLUSTER_COMPACT_KEEP=8000 ./bin/cluster <project> agent   # keep more recent turns verbatim
+CLUSTER_COMPACT_BUFFER=30% ./bin/cluster <project> agent  # compact earlier
+CLUSTER_BG_COMPACTION=0   ./bin/cluster <project> agent   # disable experimental background summaries
+CLUSTER_COMPACT_MODEL=openai/gpt-5-mini ./bin/cluster <project> agent  # summarize with another provider
+```
+
+Server-side, the cheapest fix is a bigger window where the architecture allows
+it (`__CTX__=65536 ./ctr.sh push` — nearly free on the hybrid Lightning model,
+expensive on dense 32B). As a last-resort safety net (it silently drops the
+oldest turns instead of erroring):
+
+```bash
+__EXTRA_ARGS__="-b 512 -ub 512 --context-shift --keep 1024" ./ctr.sh push
+```
+
+### Open-source projects for context compression
+
+Grouped by what they actually do — mixing these up is the usual mistake:
+
+| Project | Approach | License | Fit for this setup |
+| --- | --- | --- | --- |
+| [OpenCode compaction](https://opencode.ai/docs/compaction/) | Summarize old turns, keep recent verbatim | MIT | ✅ already built in, now tuned by `bin/cluster` |
+| [OpenHands SDK condensers](https://github.com/All-Hands-AI/agent-sdk/tree/main/openhands-sdk/openhands/sdk/context/condenser) | Pluggable condensers: LLM summarizing, token/size, pipeline | MIT | ⭐ best reference implementation to copy |
+| [SWE-agent history processors](https://github.com/SWE-agent/SWE-agent/blob/main/sweagent/agent/history_processors.py) | `last_n`, `summarizer`, `tagged` history rewriting | MIT | ⭐ small, readable, battle-tested on code agents |
+| [Cline auto-compact](https://github.com/cline/cline/blob/main/docs/features/auto-compact.mdx) | Agent-level compaction + hooks | Apache-2.0 | ⭐ good UX model (status, manual `/compact`) |
+| [Roo Code condensing](https://github.com/RooCodeInc/Roo-Code/tree/main/src/core/condense) | Intelligent context condensing | Apache-2.0 | good for IDE-agent patterns |
+| [Letta (MemGPT)](https://github.com/letta-ai/letta) | Memory hierarchy, self-editing memory blocks | Apache-2.0 | only if you want a memory-first agent, not a patch |
+| [Mem0](https://github.com/mem0ai/mem0) | Long-term memory extraction + retrieval | Apache-2.0 | cross-session recall, not window compression |
+| [Graphiti / Zep](https://github.com/getzep/graphiti) | Temporal knowledge graph memory | Apache-2.0 | cross-session recall with relationships |
+| [Cognee](https://github.com/topoteretes/cognee) | Memory graph + ingestion pipelines | Apache-2.0 | same category as Mem0/Graphiti |
+| [LLMLingua / LLMLingua-2](https://github.com/microsoft/LLMLingua) | Token-level prompt compression (2–20×) | MIT | ⚠️ fine for tool output/docs, risky for code diffs |
+| [Selective Context](https://github.com/liyucheng09/Selective_Context) | Self-information based pruning | research code | experimental, same caveat as LLMLingua |
+| [RAPTOR](https://github.com/parthsarthi03/raptor) | Recursive summary tree over documents | MIT | good for large doc/PDF corpora, not chat history |
+| [LangMem](https://github.com/langchain-ai/langmem) | Memory tools for LangGraph agents | MIT | if you already use LangGraph |
+
+**Recommended combination for a 32k coding agent on Kaggle**
+
+1. OpenCode compaction (already on) with the tuned `keep`/`buffer` above.
+2. Keep tool output short at the source — the proxy/agent should truncate
+   `cat`/`grep`/test logs to the relevant window; OpenHands' *observation
+   masking* condenser and SWE-agent's `last_n` processor are the patterns to copy.
+3. Prefer retrieval over retention: let the agent re-read files it needs instead
+   of keeping whole files in history.
+4. Only add Mem0/Graphiti if you need memory across *sessions*; they do not solve
+   a single long session hitting the window.
+5. Avoid LLMLingua on code; it drops identifiers and silently changes semantics.
+
 ## Requirements
 
 - Python 3.9+ (clients are **stdlib-only** — no `pip install`).
