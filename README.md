@@ -64,6 +64,7 @@ sessions, ~30 GPU-h/week). Sizes are the quantized GGUF weights.
 | --- | --- | --- | --- | --- | --- |
 | [`hermes-3-8b/`](hermes-3-8b/) | Hermes-3-Llama-3.1-8B | Dense 8B (Q4_K_M) | 4.6 GB | 32k | Autonomous agents, structured JSON & tool calling |
 | [`gpt-oss-20b/`](gpt-oss-20b/) | gpt-oss-20b | MoE 21B / 3.6B active | 12.1 GB | 65k | Lightweight MoE agentic loop, low memory footprint |
+| [`nemotron-3.5-lightning-30b/`](nemotron-3.5-lightning-30b/) | Nemotron-3.5-Lightning-30B-A3B (NVIDIA) | Mamba-2 + MoE 30B / 3B active (Q4_0) | 18.9 GB | 32k (1M native) | ⚡ Fast hybrid MoE: reasoning, tool use & long context |
 | [`mistral-nemo-12b/`](mistral-nemo-12b/) | Mistral-Nemo-Instruct | Dense 12.2B (Q4_K_M) | 7.0 GB | 65k | 128k long-doc synthesis & Tekken multilingual tokenizer |
 
 > Adding another model is a folder with a `kernel_config.py`, a
