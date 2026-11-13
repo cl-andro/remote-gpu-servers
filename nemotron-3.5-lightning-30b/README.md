@@ -35,6 +35,9 @@ Runs NVIDIA's **NVIDIA-Nemotron-3.5-Lightning-30B-A3B** hybrid Mamba-2 + MoE + a
 # Check server health
 ../bin/cluster nemotron-3.5-lightning-30b health
 
+# Measure real prefill/decode tok/s (server-side timings)
+../bin/cluster nemotron-3.5-lightning-30b bench --long 16000
+
 # Stop remote kernel when finished
 ../bin/cluster nemotron-3.5-lightning-30b stop
 ```
@@ -45,10 +48,21 @@ Runs NVIDIA's **NVIDIA-Nemotron-3.5-Lightning-30B-A3B** hybrid Mamba-2 + MoE + a
 - `GET /health` — Cluster health check
 
 ## Tuning notes
+- **Speculative decoding (the big one)**: this GGUF repo ships
+  `mtp-NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf` (~1.16 GB). llama.cpp
+  auto-detects it as `draft-mtp` from the GGUF metadata, so it is a one-liner:
+
+  ```bash
+  __DRAFT_FILE__="mtp-NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf" \
+  __DRAFT_SIZE_GB__=1.16 ./ctr.sh push
+  ```
+
+  Expect ~1.3–2× decode. Run `./ctr.sh bench` afterwards and check the reported
+  draft acceptance rate — below ~40% it is not worth the extra VRAM.
+- **Measure, don't guess**: `./ctr.sh bench --long 16000` reports the server's own
+  prompt/decode tok/s and greps the log for CPU-offloaded layers.
 - **Smaller / larger quants**: swap `__MODEL_FILE__` (e.g. `...-Q8_0.gguf` is 33.59 GB and
   does **not** fit dual T4; `bartowski/...-IQ4_XS.gguf` is ~18.92 GB).
-- **Speculative decoding**: the repo ships `mtp-NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf`
-  (~1.16 GB). Enable with `__DRAFT_FILE__="mtp-NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf"
-  __DRAFT_SIZE_GB__=1.16 ./ctr.sh push` — treat as experimental on Turing.
+- **Prefill**: `-ub 512` is conservative; try `-ub 1024` if `bench` shows free VRAM.
 - **Flash attention** stays `off` on sm_75 to avoid the T4 prefill deadlock seen on
   other projects; re-enable with `__FLASH_ATTN__=on ./ctr.sh push` if you want to test.

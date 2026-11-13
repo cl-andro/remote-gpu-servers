@@ -14,6 +14,7 @@
 #   stop-url  print/cache the stop URL for the current run
 #   output    download the run's output files
 #   test      health check + a sample chat through the tunnel
+#   bench     measure prefill/decode tok/s (server timings + log checks)
 #
 # The Kaggle token is read from <repo-root>/.env (KGAT_...).
 set -euo pipefail
@@ -254,6 +255,13 @@ PY
       python3 "$CLIENT" --url "$URL" --model "$MODEL_ALIAS" chat --no-think --max-tokens 128 \
         "Reply with exactly: CLUSTER ONLINE"
     fi
+    ;;
+  bench)
+    # Prompt/decode throughput measurement (server-side timings + log checks).
+    URL="$(cat "$URL_FILE" 2>/dev/null || extract_url "$KERNEL" || true)"
+    [[ -z "$URL" ]] && { echo "no URL; run ./bin/cluster $(basename "$PROJECT") url first" >&2; exit 1; }
+    shift
+    exec python3 "$ROOT/lib/bench.py" --url "$URL" "$@"
     ;;
   chat|stream|repl|tools|health|props|models|slots|reset|tokenize|raw|gen|parse|tts)
     # Direct passthrough to the stdlib client (one-shot chat, REPL, image gen, etc.).

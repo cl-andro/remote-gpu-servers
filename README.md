@@ -163,10 +163,71 @@ cd qwen3-coder-30b
 | `status` | kernel run status |
 | `logs` / `follow` | print recent logs / live-tail them |
 | `test` | health check + a sample chat through the tunnel |
+| `bench` | measure prefill/decode tok/s, prefix-cache and GPU offload from the server log |
 | `chat` `stream` `repl` `tools` `props` `models` `slots` `tokenize` `raw` | passthrough to the stdlib client |
 | `stop` | ask the kernel to exit, then wait for `COMPLETE` |
 | `stop-url` | print/cache the current stop URL |
 | `output` | download the run's output files |
+
+## Performance on 2× T4 (why "32 GB of GPU" still feels slow)
+
+Kaggle gives you **two 16 GB Tesla T4s**, not one 32 GB GPU. They are 2018 cards
+with ~320 GB/s of HBM bandwidth each, linked only by PCIe (no NVLink), and with
+`--split-mode layer` llama.cpp runs the GPUs **in series**: layer half 1 on GPU 0,
+then half 2 on GPU 1, while the idle GPU waits. Decode speed is therefore bounded
+by **one** GPU's bandwidth, not two.
+
+Decoding is memory-bandwidth-bound: every generated token must read the weights
+of the layers that fire. So the ceiling is roughly
+`320 GB/s ÷ bytes read per token`:
+
+| Model class (Q4) | Bytes read / token | Theoretical max | Realistic on 2×T4 |
+| --- | --- | --- | --- |
+| Dense 24–32B (e.g. qwen2.5-coder-32b) | ~18 GB | ~17 tok/s | **8–12 tok/s** |
+| Dense 8–14B | ~5–8 GB | 40–65 tok/s | **20–35 tok/s** |
+| MoE 30B / ~3B active (qwen3-coder-30b, nemotron-3.5-lightning) | ~2 GB | ~150 tok/s | **30–60 tok/s** |
+
+If you are below that band, it is almost never "Kaggle being slow" — it is one of
+the items in the checklist below. Measure first, guess second:
+
+```bash
+./bin/cluster <project> bench                # cold/warm request + long prefill
+./bin/cluster <project> bench --long 16000   # what an agent session really costs
+```
+
+`bench` prints the server's own `prompt_per_second` / `predicted_per_second`, the
+speculative-draft acceptance rate, and greps the llama-server log for offloaded
+layers, per-GPU buffer sizes, flash-attention and allocation errors.
+
+### Optimization checklist
+
+1. **Everything must be in VRAM.** `bench` should show `offloaded N/N layers`.
+   One layer on CPU can drop you from 40 tok/s to 3. Free VRAM by lowering
+   `__CTX__`, using a smaller quant, or dropping `mmproj`.
+2. **Prefer MoE with a small active count.** This is the single biggest lever:
+   30B-A3B decodes 4–6× faster than a dense 32B of the same file size.
+3. **Speculative decoding.** For `nemotron-3.5-lightning-30b` the GGUF repo ships
+   an MTP drafter that llama.cpp auto-detects:
+   `__DRAFT_FILE__="mtp-NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf" __DRAFT_SIZE_GB__=1.16 ./ctr.sh push`
+   Expect ~1.3–2× decode. Watch the acceptance rate in `bench`; below ~40% it is
+   not paying for itself.
+4. **Prefill ≠ decode.** A 20k-token agent prompt at 300 tok/s costs ~70 s before
+   the first token. Raise `-ub` (512 → 1024/2048) if VRAM allows — that is a
+   prefill-only knob — and keep system prompts/tool lists stable so
+   `cache_prompt` can reuse the prefix.
+5. **Do not chase parallel requests.** `-np 1` keeps the whole context for one
+   stream; two concurrent requests on a T4 pair just split the same bandwidth.
+6. **CUDA graphs** are disabled globally in `lib/cells.py`
+   (`GGML_CUDA_DISABLE_GRAPHS=1`) to avoid MoE multi-GPU hangs on Turing. If a
+   single-GPU project is stable, unsetting it recovers ~5–15% decode.
+7. **Flash attention off on sm_75** is deliberate (prefill deadlock on Turing),
+   but costs a little on attention-heavy models; test with
+   `__FLASH_ATTN__=on ./ctr.sh push`.
+8. **Check the hardware itself**: `nvidia-smi --query-gpu=clocks.sm,clocks.max.sm,temperature.gpu,pcie.link.width.current --format=csv`
+   inside the kernel. A thermally throttled T4 can halve its clock.
+9. **The tunnel is not the bottleneck** for tok/s, but every SSE flush pays an
+   RTT through Cloudflare; judge speed with `bench` (server timings), not by
+   watching the agent stream.
 
 ## Requirements
 
