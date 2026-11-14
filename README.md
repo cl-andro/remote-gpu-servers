@@ -313,6 +313,17 @@ Grouped by what they actually do — mixing these up is the usual mistake:
    a single long session hitting the window.
 5. Avoid LLMLingua on code; it drops identifiers and silently changes semantics.
 
+### ⚠️ Experimental — Edge0 latent MoE (not runnable on T4 yet)
+
+| Project | Model | Runtime | Pack | Expect |
+| --- | --- | --- | --- | --- |
+| [`edge0-120b/`](edge0-120b/) | Edge0-120B, 120B / 6.1B active | Strata (source build, CUDA) | 92 GB q3k | 5–15 tok/s* |
+| [`edge0-145b/`](edge0-145b/) | Edge0-145B, 145B / 6.6B active | Strata (source build, CUDA) | 105 GB q3k | 5–15 tok/s* |
+
+\* Estimate. No prebuilt Linux engine, NVFP4 needs Blackwell (T4 is sm_75, so the
+q3k pack), and the engine builds from source. `ctr.sh push` runs a preflight only.
+Upstream decode: RTX 5090D NVFP4 124.9 tok/s, RTX 4090 Q3_K 95.0 tok/s.
+
 ## Requirements
 
 - Python 3.9+ (clients are **stdlib-only** — no `pip install`).
