@@ -12,7 +12,7 @@ CFG = {
     "__MODEL_SIZE_GB__": "5.99",
     "__MODEL_ALIAS__": "edge0-145b,edge0_145b",
     "__CTX__": "32768",
-    "__PORT__": "8080",
+    "__PORT__": "8000",
     "__CTL_PORT__": "8081",
     "__SERVE_MINUTES__": "660",
 }
