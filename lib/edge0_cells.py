@@ -26,6 +26,18 @@ if not os.path.isdir(SRC):
     run(["git", "clone", "--depth", "1",
          "https://github.com/Edge0-AI/Edge0.git", SRC])
 
+CACHE = sorted(glob.glob("/kaggle/input/*/edge0-engine"))
+def maybe(cmd, **kw):
+    if not CACHE:
+        run(cmd, **kw)
+if CACHE:
+    for d in (os.path.join(STRATA, "build"), os.path.join(INFER, "build", "cpu", "bin")):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy2(os.path.join(CACHE[0], "strata"), os.path.join(STRATA, "build", "strata"))
+    shutil.copy2(os.path.join(CACHE[0], "edge0-infer"), os.path.join(INFER, "build", "cpu", "bin", "edge0-infer"))
+    for so in glob.glob(os.path.join(CACHE[0], "*.so*")):
+        shutil.copy2(so, os.path.join(STRATA, "build"))
+    print("cached engine:", CACHE[0], flush=True)
 LLAMA_DIR = os.path.join(STRATA, "third_party", "llama.cpp")
 if not os.path.exists(os.path.join(LLAMA_DIR, "CMakeLists.txt")):
     os.makedirs(LLAMA_DIR, exist_ok=True)
@@ -35,21 +47,29 @@ if not os.path.exists(os.path.join(LLAMA_DIR, "CMakeLists.txt")):
 
 env = dict(os.environ)
 env["PATH"] = os.path.dirname(nvcc) + ":" + env["PATH"]
-run(["cmake", "-S", STRATA, "-B", os.path.join(STRATA, "build"), "-G", "Ninja",
+maybe(["cmake", "-S", STRATA, "-B", os.path.join(STRATA, "build"), "-G", "Ninja",
      "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_CUDA_COMPILER=" + nvcc,
      "-DCMAKE_CUDA_ARCHITECTURES=75", "-DSTRATA_ENABLE_CUDA=ON",
      "-DSTRATA_GGML_DIR=" + LLAMA_DIR], env=env)
-run(["cmake", "--build", os.path.join(STRATA, "build"), "--target", "strata"], env=env)
+maybe(["cmake", "--build", os.path.join(STRATA, "build"), "--target", "strata"], env=env)
 
-run(["cmake", "-S", INFER, "-B", os.path.join(INFER, "build", "cpu"),
+maybe(["cmake", "-S", INFER, "-B", os.path.join(INFER, "build", "cpu"),
      "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"], env=env)
-run(["cmake", "--build", os.path.join(INFER, "build", "cpu"), "-j", "4"], env=env)
+maybe(["cmake", "--build", os.path.join(INFER, "build", "cpu"), "-j", "4"], env=env)
 
 venv = os.path.join(STRATA, ".venv")
 run(["uv", "venv", "--python", sys.executable, venv])
 python = os.path.join(venv, "bin", "python")
 run(["uv", "pip", "install", "--python", python,
      "-r", os.path.join(STRATA, "requirements.txt")])
+if not CACHE:
+    out = "/kaggle/working/edge0-engine"
+    os.makedirs(out, exist_ok=True)
+    shutil.copy2(os.path.join(STRATA, "build", "strata"), out)
+    shutil.copy2(os.path.join(INFER, "build", "cpu", "bin", "edge0-infer"), out)
+    for so in glob.glob(os.path.join(STRATA, "build", "*.so*")):
+        shutil.copy2(so, out)
+    print("cached engine ->", out, flush=True)
 print("build done", flush=True)
 '''
 
