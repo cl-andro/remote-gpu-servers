@@ -26,7 +26,8 @@ if not os.path.isdir(SRC):
     run(["git", "clone", "--depth", "1",
          "https://github.com/Edge0-AI/Edge0.git", SRC])
 
-CACHE = sorted(glob.glob("/kaggle/input/*/edge0-engine"))
+CACHE = [os.path.dirname(p) for p in glob.glob("/kaggle/input/**/strata", recursive=True)
+         if os.path.exists(os.path.join(os.path.dirname(p), "edge0-infer"))]
 def maybe(cmd, **kw):
     if not CACHE:
         run(cmd, **kw)
