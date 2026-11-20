@@ -54,6 +54,7 @@ sessions, ~30 GPU-h/week). Sizes are the quantized GGUF weights.
 | Project | Model | Type | Size | Context | Best for |
 | --- | --- | --- | --- | --- | --- |
 | [`nemotron-3.5-bolt-74b/`](nemotron-3.5-bolt-74b/) | Nemotron-3.5-Bolt-74B-A9B (NVIDIA) | Mamba2-Transformer MoE 74B / 9B active + vision | 22.1 GB | 32k | ⚡ Hybrid MoE flagship: agentic tool use, vision, terminal & coding |
+| [`qwen3.8-flash-next/`](qwen3.8-flash-next/) | Qwen3.8-Flash-Next (Alibaba) | MoE 125B / 6B active + vision (REAP25 UD-IQ4_XS) | 18.9 GB | 32k (256k native) | 🚀 Qwen4 preview: hybrid QSA + GDN linear attention, deep reasoning & vision |
 | [`qwen3.8-27b/`](qwen3.8-27b/) | Qwen3.8-27B (Alibaba) | Dense 27B + vision (UD-Q4_K_XL) | 18.5 GB | 32k | 👁️ Hybrid linear-attention dense vision-language & reasoning |
 | [`qwen2.5-vl-7b/`](qwen2.5-vl-7b/) | Qwen2.5-VL-7B-Instruct | 7B + mmproj F16 | 5.6 GB | 32k | Scanned documents, OCR, charts & screen grounding |
 | [`minicpm-v-2_6/`](minicpm-v-2_6/) | MiniCPM-V-2.6 | 8B + mmproj F16 | 5.3 GB | 32k | High-res table extraction & multi-image comparison |
