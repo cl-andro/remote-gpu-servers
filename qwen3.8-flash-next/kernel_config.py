@@ -29,8 +29,9 @@ CFG = {
     "__CTL_PORT__": "8081",
     "__SERVE_MINUTES__": "660",
 
-    # --- vision / multimodal projector ---
-    "__MMPROJ_FILE__": "mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+    # --- vision / multimodal projector (from unsloth official repo) ---
+    "__MMPROJ_REPO__": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "__MMPROJ_FILE__": "mmproj-BF16.gguf",
     "__MMPROJ_SIZE_GB__": "0.85",
     "__DRAFT_FILE__": "",
     "__DRAFT_SIZE_GB__": "",

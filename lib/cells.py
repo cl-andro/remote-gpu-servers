@@ -44,6 +44,7 @@ import os, subprocess, sys
 MODEL_REPO = "__MODEL_REPO__"
 MODEL_FILE = "__MODEL_FILE__"
 MODEL_SIZE_GB = float("__MODEL_SIZE_GB__")
+MMPROJ_REPO = "__MMPROJ_REPO__" or MODEL_REPO
 MMPROJ_FILE = "__MMPROJ_FILE__"
 MMPROJ_SIZE_GB = float("__MMPROJ_SIZE_GB__" or "0")
 DRAFT_FILE = "__DRAFT_FILE__"
@@ -94,7 +95,7 @@ def ensure(repo, filename, size_gb, label):
 
 
 model_path = ensure(MODEL_REPO, MODEL_FILE, MODEL_SIZE_GB, "model")
-mmproj_path = ensure(MODEL_REPO, MMPROJ_FILE, MMPROJ_SIZE_GB, "mmproj")
+mmproj_path = ensure(MMPROJ_REPO, MMPROJ_FILE, MMPROJ_SIZE_GB, "mmproj")
 draft_path = ensure(MODEL_REPO, DRAFT_FILE, DRAFT_SIZE_GB, "draft")
 '''
 

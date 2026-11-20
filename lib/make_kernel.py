@@ -23,8 +23,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from cells import CELLS, FLUX_CELLS, FLUX_FACE_CELLS, SDXL_CELLS, OMNIGEN_CELLS, JANUS_CELLS, Z_IMAGE_CELLS, PARSE_CELLS, MING_CELLS, SENSENOVA_CELLS, UNLIMITED_OCR_CELLS, XIAOMI_OCR_CELLS, CELL_1_ENV  # noqa: E402
-from edge0_cells import CELL_EDGE0_PREFLIGHT  # noqa: E402
+from cells import CELLS, FLUX_CELLS, FLUX_FACE_CELLS, SDXL_CELLS, OMNIGEN_CELLS, JANUS_CELLS, Z_IMAGE_CELLS, PARSE_CELLS, MING_CELLS, SENSENOVA_CELLS, UNLIMITED_OCR_CELLS, XIAOMI_OCR_CELLS, CELL_1_ENV, CELL_5_KEEPALIVE  # noqa: E402
+from edge0_cells import CELL_EDGE0_BUILD, CELL_EDGE0_SERVE  # noqa: E402
 
 # Placeholders whose value is not allowed to be empty.
 REQUIRED_LLM = (
@@ -34,6 +34,7 @@ REQUIRED_LLM = (
 )
 
 DEFAULTS_LLM = {
+    "__MMPROJ_REPO__": "",
     "__MMPROJ_FILE__": "", "__MMPROJ_SIZE_GB__": "",
     "__DRAFT_FILE__": "", "__DRAFT_SIZE_GB__": "",
     "__SPLIT_MODE__": "layer", "__EXTRA_ARGS__": "",
@@ -296,7 +297,7 @@ def main() -> None:
     elif model_type in ("xiaomi-ocr", "xiaomi-ocr-0", "xiaomi"):
         template_cells = XIAOMI_OCR_CELLS
     elif model_type == "edge0":
-        template_cells = [CELL_1_ENV, CELL_EDGE0_PREFLIGHT]
+        template_cells = [CELL_1_ENV, CELL_EDGE0_BUILD, CELL_EDGE0_SERVE, CELL_5_KEEPALIVE]
     else:
         template_cells = CELLS
     cells = [render(c, cfg) for c in template_cells]

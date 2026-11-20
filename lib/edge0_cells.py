@@ -27,7 +27,8 @@ if not os.path.isdir(SRC):
          "https://github.com/Edge0-AI/Edge0.git", SRC])
 
 CACHE = [os.path.dirname(p) for p in glob.glob("/kaggle/input/**/strata", recursive=True)
-         if os.path.exists(os.path.join(os.path.dirname(p), "edge0-infer"))]
+         if os.path.exists(os.path.join(os.path.dirname(p), "edge0-infer"))
+         and glob.glob(os.path.join(os.path.dirname(p), "libggml*"))]
 def maybe(cmd, **kw):
     if not CACHE:
         run(cmd, **kw)
@@ -38,6 +39,10 @@ if CACHE:
     shutil.copy2(os.path.join(CACHE[0], "edge0-infer"), os.path.join(INFER, "build", "cpu", "bin", "edge0-infer"))
     for so in glob.glob(os.path.join(CACHE[0], "*.so*")):
         shutil.copy2(so, os.path.join(STRATA, "build"))
+        shutil.copy2(so, os.path.join(INFER, "build", "cpu", "bin"))
+    for b in (os.path.join(STRATA, "build", "strata"),
+              os.path.join(INFER, "build", "cpu", "bin", "edge0-infer")):
+        os.chmod(b, 0o755)
     print("cached engine:", CACHE[0], flush=True)
 LLAMA_DIR = os.path.join(STRATA, "third_party", "llama.cpp")
 if not os.path.exists(os.path.join(LLAMA_DIR, "CMakeLists.txt")):
@@ -68,7 +73,9 @@ if not CACHE:
     os.makedirs(out, exist_ok=True)
     shutil.copy2(os.path.join(STRATA, "build", "strata"), out)
     shutil.copy2(os.path.join(INFER, "build", "cpu", "bin", "edge0-infer"), out)
-    for so in glob.glob(os.path.join(STRATA, "build", "*.so*")):
+    libs = (glob.glob(os.path.join(STRATA, "build", "**", "*.so*"), recursive=True) +
+            glob.glob(os.path.join(INFER, "build", "**", "*.so*"), recursive=True))
+    for so in libs:
         shutil.copy2(so, out)
     print("cached engine ->", out, flush=True)
 print("build done", flush=True)
@@ -144,7 +151,10 @@ server = None
 for attempt, cmd in enumerate(variants, 1):
     print(f"launching (attempt {attempt}):", " ".join(cmd), flush=True)
     fh = open(LOG, "w")
-    server = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT)
+    senv = dict(os.environ)
+    senv["LD_LIBRARY_PATH"] = ":".join([os.path.dirname(BIN),
+        os.path.join(SRC, "edge0-strata", "build"), senv.get("LD_LIBRARY_PATH", "")])
+    server = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, env=senv)
     for i in range(240):
         time.sleep(5)
         if server.poll() is not None:
