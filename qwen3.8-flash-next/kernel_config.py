@@ -17,11 +17,21 @@ CFG = {
     # --- llama.cpp (b12174+ required for Qwen4Exp / Qwen3.8-Flash-Next hybrid attention) ---
     "__LLAMA_BUILD__": "b12174",
 
+    # --- N-gram lookup table (PLE required for Qwen4Exp / Qwen3.8-Flash-Next) ---
+    "__PLE_REPO__": "anik-jha/Qwen3.8-Flash-Next-24GB-GGUF",
+    "__PLE_FILE__": "Qwen3.8-Flash-Next-ngram-table-IQ4_NL.gguf_file",
+    "__PLE_SIZE_GB__": "26.8",
+
+    # --- Recovery adapter (restores pruned expert outputs) ---
+    "__ADAPTER_REPO__": "anik-jha/Qwen3.8-Flash-Next-24GB-GGUF",
+    "__ADAPTER_FILE__": "recovery-adapter/Qwen3.8-Flash-Next-24GB-REAP25-adapter.gguf",
+    "__ADAPTER_SIZE_GB__": "1.79",
+
     # --- runtime ---
     "__CTX__": "32768",
     "__NGL__": "99",
     "__SPLIT_MODE__": "layer",
-    "__EXTRA_ARGS__": "-b 2048 -ub 1024",
+    "__EXTRA_ARGS__": "-lm mmap -lzm on -ctk q8_0 -ctv q8_0 --presence-penalty 1.5 --repeat-last-n 20480 -b 2048 -ub 1024",
     "__FLASH_ATTN__": "on",
 
     # --- networking ---
@@ -29,10 +39,10 @@ CFG = {
     "__CTL_PORT__": "8081",
     "__SERVE_MINUTES__": "660",
 
-    # --- vision / multimodal projector (from unsloth official repo) ---
-    "__MMPROJ_REPO__": "unsloth/Qwen3.8-Flash-Next-GGUF",
-    "__MMPROJ_FILE__": "mmproj-BF16.gguf",
-    "__MMPROJ_SIZE_GB__": "0.85",
+    # --- vision / multimodal projector ---
+    "__MMPROJ_REPO__": "",
+    "__MMPROJ_FILE__": "",
+    "__MMPROJ_SIZE_GB__": "",
     "__DRAFT_FILE__": "",
     "__DRAFT_SIZE_GB__": "",
 }

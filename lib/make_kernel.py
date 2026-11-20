@@ -37,6 +37,8 @@ DEFAULTS_LLM = {
     "__MMPROJ_REPO__": "",
     "__MMPROJ_FILE__": "", "__MMPROJ_SIZE_GB__": "",
     "__DRAFT_FILE__": "", "__DRAFT_SIZE_GB__": "",
+    "__PLE_REPO__": "", "__PLE_FILE__": "", "__PLE_SIZE_GB__": "",
+    "__ADAPTER_REPO__": "", "__ADAPTER_FILE__": "", "__ADAPTER_SIZE_GB__": "",
     "__SPLIT_MODE__": "layer", "__EXTRA_ARGS__": "",
     "__FLASH_ATTN__": "off",
 }

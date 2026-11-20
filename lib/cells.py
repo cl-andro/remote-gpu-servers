@@ -49,6 +49,12 @@ MMPROJ_FILE = "__MMPROJ_FILE__"
 MMPROJ_SIZE_GB = float("__MMPROJ_SIZE_GB__" or "0")
 DRAFT_FILE = "__DRAFT_FILE__"
 DRAFT_SIZE_GB = float("__DRAFT_SIZE_GB__" or "0")
+PLE_REPO = "__PLE_REPO__" or MODEL_REPO
+PLE_FILE = "__PLE_FILE__"
+PLE_SIZE_GB = float("__PLE_SIZE_GB__" or "0")
+ADAPTER_REPO = "__ADAPTER_REPO__" or MODEL_REPO
+ADAPTER_FILE = "__ADAPTER_FILE__"
+ADAPTER_SIZE_GB = float("__ADAPTER_SIZE_GB__" or "0")
 
 MODEL_DIR = "/kaggle/temp/models"
 os.makedirs(MODEL_DIR, exist_ok=True)
@@ -56,7 +62,8 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 
 def curl_download(repo, filename, dest_dir):
     """Resume-capable curl download from the HF resolve endpoint."""
-    out = os.path.join(dest_dir, os.path.basename(filename))
+    out = os.path.join(dest_dir, filename)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
     url = f"https://huggingface.co/{repo}/resolve/main/{filename}"
     print(f"downloading {filename} -> {out}", flush=True)
     subprocess.run(["curl", "-L", "-C", "-", "--retry", "10", "--retry-delay", "5",
@@ -81,7 +88,8 @@ def ensure(repo, filename, size_gb, label):
     """Download `filename` unless a complete copy is already present."""
     if not filename:
         return ""
-    path = os.path.join(MODEL_DIR, os.path.basename(filename))
+    path = os.path.join(MODEL_DIR, filename)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     floor = int(size_gb * 1e9 * 0.98) if size_gb else 0
     if os.path.exists(path) and (not floor or os.path.getsize(path) >= floor):
         print(f"{label}: cached {path}", flush=True)
@@ -97,6 +105,8 @@ def ensure(repo, filename, size_gb, label):
 model_path = ensure(MODEL_REPO, MODEL_FILE, MODEL_SIZE_GB, "model")
 mmproj_path = ensure(MMPROJ_REPO, MMPROJ_FILE, MMPROJ_SIZE_GB, "mmproj")
 draft_path = ensure(MODEL_REPO, DRAFT_FILE, DRAFT_SIZE_GB, "draft")
+ple_path = ensure(PLE_REPO, PLE_FILE, PLE_SIZE_GB, "ple")
+adapter_path = ensure(ADAPTER_REPO, ADAPTER_FILE, ADAPTER_SIZE_GB, "adapter")
 '''
 
 CELL_3_LLAMA = r'''
@@ -294,6 +304,10 @@ if mmproj_path:
     cmd += ["--mmproj", mmproj_path]
 if draft_path:
     cmd += ["--model-draft", draft_path, "--gpu-layers-draft", str(NGL)]
+if ple_path:
+    cmd += ["--ple", ple_path]
+if adapter_path:
+    cmd += ["--lora-scaled", f"{adapter_path}:1"]
 cmd += EXTRA_ARGS
 print("launching:", " ".join(cmd), flush=True)
 
