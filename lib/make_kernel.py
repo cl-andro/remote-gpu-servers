@@ -23,7 +23,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from cells import CELLS, FLUX_CELLS, FLUX_FACE_CELLS, SDXL_CELLS, OMNIGEN_CELLS, JANUS_CELLS, Z_IMAGE_CELLS, PARSE_CELLS, MING_CELLS, SENSENOVA_CELLS, UNLIMITED_OCR_CELLS, XIAOMI_OCR_CELLS, CELL_1_ENV, CELL_5_KEEPALIVE  # noqa: E402
+from cells import CELLS, FLUX_CELLS, FLUX_FACE_CELLS, SDXL_CELLS, OMNIGEN_CELLS, JANUS_CELLS, Z_IMAGE_CELLS, PARSE_CELLS, MING_CELLS, SENSENOVA_CELLS, UNLIMITED_OCR_CELLS, XIAOMI_OCR_CELLS, SD_CHECKPOINT_CELLS, CELL_1_ENV, CELL_5_KEEPALIVE  # noqa: E402
 from edge0_cells import CELL_EDGE0_BUILD, CELL_EDGE0_SERVE  # noqa: E402
 
 # Placeholders whose value is not allowed to be empty.
@@ -153,6 +153,22 @@ DEFAULTS_XIAOMI_OCR = {
     "__DEFAULT_MAX_TOKENS__": "4096",
 }
 
+REQUIRED_SD_CHECKPOINT = (
+    "__PROJECT_NAME__", "__MODEL_REPO__", "__MODEL_FILE__", "__MODEL_SIZE_GB__",
+    "__PORT__", "__CTL_PORT__",
+    "__SERVE_MINUTES__", "__MODEL_ALIAS__",
+)
+
+DEFAULTS_SD_CHECKPOINT = {
+    "__DEFAULT_STEPS__": "20",
+    "__DEFAULT_WIDTH__": "512",
+    "__DEFAULT_HEIGHT__": "512",
+    "__VAE_PATH__": "",
+    "__LORA_PATH__": "",
+    "__LORA_SCALE__": "1.0",
+    "__MODEL_PATH__": "",
+}
+
 # Edge0 latent-MoE packs are not llama.cpp models: preflight only for now.
 REQUIRED_EDGE0 = (
     "__PROJECT_NAME__", "__MODEL_REPO__", "__PORT__", "__CTL_PORT__",
@@ -230,6 +246,9 @@ def load_cfg(project_dir: str) -> dict:
     elif model_type in ("xiaomi-ocr", "xiaomi-ocr-0", "xiaomi"):
         defaults = dict(DEFAULTS_XIAOMI_OCR)
         required = REQUIRED_XIAOMI_OCR
+    elif model_type == "sd-checkpoint":
+        defaults = dict(DEFAULTS_SD_CHECKPOINT)
+        required = REQUIRED_SD_CHECKPOINT
     elif model_type == "edge0":
         defaults = dict(DEFAULTS_EDGE0)
         required = REQUIRED_EDGE0
@@ -298,6 +317,8 @@ def main() -> None:
         template_cells = UNLIMITED_OCR_CELLS
     elif model_type in ("xiaomi-ocr", "xiaomi-ocr-0", "xiaomi"):
         template_cells = XIAOMI_OCR_CELLS
+    elif model_type == "sd-checkpoint":
+        template_cells = SD_CHECKPOINT_CELLS
     elif model_type == "edge0":
         template_cells = [CELL_1_ENV, CELL_EDGE0_BUILD, CELL_EDGE0_SERVE, CELL_5_KEEPALIVE]
     else:

@@ -34,6 +34,14 @@ sessions, ~30 GPU-h/week). Sizes are the quantized GGUF weights.
 | [`janus-pro-7b/`](janus-pro-7b/) | Janus-Pro-7B (DeepSeek) | 7B Unified Multimodal | 14.0 GB | DeepSeek | Instruction-driven visual generation & multimodal reasoning |
 | [`sdxl-turbo/`](sdxl-turbo/) | SDXL-Turbo | 3.5B ADD (FP16) | 6.0 GB | 1 step | Instant real-time text-to-image (~1.5s/img) |
 
+### 🎨 Stable Diffusion Checkpoints (stable-diffusion.cpp)
+| Project | Model | Base | Size | Steps | Best for |
+| --- | --- | --- | --- | --- | --- |
+| [`dreamshaper-8/`](dreamshaper-8/) | DreamShaper 8 | SD 1.5 | 2.1 GB | 20 | General purpose, fantasy, art |
+| [`cyberrealistic-v8/`](cyberrealistic-v8/) | CyberRealistic V8 | SD 1.5 | 2.0 GB | 20 | Photorealistic, portraits, low VRAM |
+| [`juggernaut-xl-v9/`](juggernaut-xl-v9/) | Juggernaut XL v9 Lightning | SDXL | 7.1 GB | 4 | High-quality photorealism, 4-step |
+| [`sd-checkpoint/`](sd-checkpoint/) | Generic (any .safetensors/.ckpt) | SD 1.5 / SDXL | Variable | Configurable | Custom checkpoints from HF |
+
 ### 💻 Coding Specialists
 | Project | Model | Type | Size | Context | Best for |
 | --- | --- | --- | --- | --- | --- |

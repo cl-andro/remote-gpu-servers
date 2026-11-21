@@ -1,0 +1,13 @@
+{
+  "id": "mohammadzaid/juggernaut-xl-v9",
+  "title": "Juggernaut XL v9 Lightning (SDXL) - stable-diffusion.cpp",
+  "code_file": "notebook.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}

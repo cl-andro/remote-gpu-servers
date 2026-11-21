@@ -7043,4 +7043,555 @@ print(f"Health         : {public_url}/health")
 print("Stop from PC   : ctr.sh stop   (uses the control tunnel above)")
 '''
 
+# =============================================================================
+# Stable Diffusion Checkpoint Models (stable-diffusion.cpp)
+# Supports SD 1.5 (.safetensors/.ckpt) and SDXL checkpoints
+# =============================================================================
+
+CELL_2_SD_CHECKPOINT_DEPS = r'''
+# --- Cell 2: install dependencies for stable-diffusion.cpp ------------------
+import subprocess, sys, os
+
+# Install Python dependencies for the server wrapper
+pkgs = [
+    "pillow",
+    "numpy",
+    "safetensors",
+]
+print("installing python dependencies:", " ".join(pkgs), flush=True)
+subprocess.run([sys.executable, "-m", "pip", "install", "-q"] + pkgs, check=True)
+
+# Build stable-diffusion.cpp from source (optimized for T4)
+SD_CPP_DIR = "/kaggle/temp/stable-diffusion.cpp"
+if not os.path.exists(SD_CPP_DIR):
+    print("cloning stable-diffusion.cpp...", flush=True)
+    subprocess.run(["git", "clone", "--depth=1", "https://github.com/leejet/stable-diffusion.cpp.git", SD_CPP_DIR], check=True)
+
+# Build with CUDA for T4 (sm_75)
+BUILD_DIR = os.path.join(SD_CPP_DIR, "build")
+os.makedirs(BUILD_DIR, exist_ok=True)
+os.chdir(BUILD_DIR)
+
+print("configuring cmake with CUDA...", flush=True)
+subprocess.run([
+    "cmake", "..",
+    "-DSD_CUDA=ON",
+    "-DSD_BUILD_SHARED_LIBS=ON",
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DCMAKE_CUDA_ARCHITECTURES=75"
+], check=True)
+
+print("building stable-diffusion.cpp (this takes a few minutes)...", flush=True)
+subprocess.run(["cmake", "--build", ".", "--config", "Release", "-j", "4"], check=True)
+
+# Find the built binary
+SD_BIN = os.path.join(BUILD_DIR, "bin", "sd")
+if not os.path.exists(SD_BIN):
+    # Try alternative locations
+    for root, dirs, files in os.walk(BUILD_DIR):
+        for f in files:
+            if f == "sd" or f.startswith("sd-"):
+                SD_BIN = os.path.join(root, f)
+                break
+
+if not os.path.exists(SD_BIN):
+    raise RuntimeError("stable-diffusion.cpp binary not found after build")
+
+print(f"stable-diffusion.cpp built: {SD_BIN}", flush=True)
+os.chmod(SD_BIN, 0o755)
+
+# Copy to a known location
+import shutil
+TARGET_DIR = "/kaggle/temp/sd-cpp"
+os.makedirs(TARGET_DIR, exist_ok=True)
+TARGET_BIN = os.path.join(TARGET_DIR, "sd")
+shutil.copy2(SD_BIN, TARGET_BIN)
+print(f"binary copied to {TARGET_BIN}", flush=True)
+'''
+
+CELL_3_SD_CHECKPOINT_SERVE = r'''
+# --- Cell 3: load checkpoint + start stable-diffusion.cpp server + tunnels ---
+import os, re, subprocess, time, urllib.request, json, threading, http.server
+import base64, io, gc
+from PIL import Image
+
+PORT = int("__PORT__")
+CTL_PORT = int("__CTL_PORT__")
+DEFAULT_STEPS = int("__DEFAULT_STEPS__" or "20")
+DEFAULT_WIDTH = int("__DEFAULT_WIDTH__" or "512")
+DEFAULT_HEIGHT = int("__DEFAULT_HEIGHT__" or "512")
+MODEL_PATH = "__MODEL_PATH__"  # Full path to .safetensors or .ckpt file
+MODEL_ALIAS = "__MODEL_ALIAS__"
+VAE_PATH = "__VAE_PATH__" or ""
+LORA_PATH = "__LORA_PATH__" or ""
+LORA_SCALE = float("__LORA_SCALE__" or "1.0")
+
+STOP_REQUESTED = threading.Event()
+GEN_LOCK = threading.Lock()
+
+WORK = "/kaggle/temp/run"
+os.makedirs(WORK, exist_ok=True)
+CF_LOG = os.path.join(WORK, "cloudflared.log")
+CTL_LOG = os.path.join(WORK, "cloudflared-ctl.log")
+
+# ---- cloudflared binary ----
+CF = "/kaggle/temp/cloudflared"
+if not os.path.exists(CF):
+    cf_urls = [
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+        "https://gh-proxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+    ]
+    downloaded = False
+    for u in cf_urls:
+        try:
+            subprocess.run(["curl", "-4", "-fSL", "--connect-timeout", "10", "--max-time", "120",
+                            "--retry", "2", "--retry-delay", "2",
+                            "-o", CF, u],
+                           check=True)
+            downloaded = True
+            break
+        except Exception as e:
+            print(f"Failed downloading cloudflared from {u}: {e}", flush=True)
+    if not downloaded:
+        raise RuntimeError("Failed to download cloudflared from all sources")
+    os.chmod(CF, 0o755)
+
+# ---- stable-diffusion.cpp binary ----
+SD_BIN = "/kaggle/temp/sd-cpp/sd"
+if not os.path.exists(SD_BIN):
+    raise RuntimeError("stable-diffusion.cpp binary not found at " + SD_BIN)
+
+# ---- Model file ----
+# Model is downloaded via the standard HF download mechanism
+model_file = os.path.join("/kaggle/temp/models", os.path.basename(MODEL_PATH))
+if not os.path.exists(model_file):
+    raise RuntimeError(f"Model file not found: {model_file}")
+
+print(f"Using model: {model_file}", flush=True)
+
+# ---- Build command line args for stable-diffusion.cpp ----
+SD_ARGS = [
+    SD_BIN,
+    "--model", model_file,
+    "--port", str(PORT),
+    "--host", "127.0.0.1",
+    "--steps", str(DEFAULT_STEPS),
+    "--cfg-scale", "7.0",
+    "--sampler", "euler_a",
+    "--width", str(DEFAULT_WIDTH),
+    "--height", str(DEFAULT_HEIGHT),
+    "--batch-size", "1",
+]
+
+if VAE_PATH and os.path.exists(os.path.join("/kaggle/temp/models", os.path.basename(VAE_PATH))):
+    SD_ARGS.extend(["--vae", os.path.join("/kaggle/temp/models", os.path.basename(VAE_PATH))])
+
+if LORA_PATH and os.path.exists(os.path.join("/kaggle/temp/models", os.path.basename(LORA_PATH))):
+    SD_ARGS.extend(["--lora", os.path.join("/kaggle/temp/models", os.path.basename(LORA_PATH)), "--lora-scale", str(LORA_SCALE)])
+
+# Enable flash attention if available
+SD_ARGS.append("--flash-attn")
+
+print(f"Starting stable-diffusion.cpp server: {' '.join(SD_ARGS)}", flush=True)
+
+# ---- Start stable-diffusion.cpp server ----
+sd_proc = subprocess.Popen(SD_ARGS, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+
+# Log server output
+def log_sd_output():
+    for line in sd_proc.stdout:
+        print(f"[sd] {line.rstrip()}", flush=True)
+        if "Server listening" in line or "listening on" in line.lower():
+            break
+
+threading.Thread(target=log_sd_output, daemon=True).start()
+
+# Wait for server to be ready
+time.sleep(5)
+for i in range(30):
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/health", timeout=2) as r:
+            if r.status == 200:
+                print("stable-diffusion.cpp server ready!", flush=True)
+                break
+    except Exception:
+        time.sleep(1)
+else:
+    raise RuntimeError("stable-diffusion.cpp server failed to start")
+
+# ---- Control Server on CTL_PORT (port 8081) ----
+STOP_TOKEN = os.environ.get("CLUSTER_STOP_TOKEN") or os.urandom(8).hex()
+
+class CtlHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def _send(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path.rstrip("/") in ("", "/health"):
+            self._send(200, {"ok": True, "status": "up",
+                             "stopping": STOP_REQUESTED.is_set(),
+                             "model": MODEL_ALIAS})
+        elif self.path.startswith("/stop/" + STOP_TOKEN):
+            STOP_REQUESTED.set()
+            self._send(200, {"ok": True, "message": "shutdown requested"})
+            print("STOP_REQUESTED received via control tunnel", flush=True)
+        else:
+            self._send(404, {"ok": False, "error": "not found"})
+
+    def do_POST(self):
+        self.do_GET()
+
+ctl = http.server.ThreadingHTTPServer(("127.0.0.1", CTL_PORT), CtlHandler)
+threading.Thread(target=ctl.serve_forever, daemon=True).start()
+
+# ---- Web UI ----
+HTML_PAGE = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{MODEL_ALIAS} Server</title>
+<style>
+  :root {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b0c10; color: #c5c6c7; }}
+  body {{ max-width: 900px; margin: 40px auto; padding: 0 20px; }}
+  .card {{ background: #1f2833; border: 1px solid #45a29e; border-radius: 12px; padding: 28px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }}
+  h1 {{ margin-top: 0; color: #66fcf1; font-size: 1.8rem; display: flex; align-items: center; gap: 10px; }}
+  .badge {{ background: #45a29e; color: #0b0c10; font-size: 0.75rem; padding: 4px 10px; border-radius: 999px; font-weight: 700; text-transform: uppercase; }}
+  p.subtitle {{ color: #c5c6c7; font-size: 0.95rem; margin-top: -6px; margin-bottom: 24px; }}
+  label {{ display: block; font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #66fcf1; margin-bottom: 6px; }}
+  textarea {{ width: 100%; box-sizing: border-box; background: #0b0c10; border: 1px solid #45a29e; border-radius: 8px; color: #fff; padding: 12px; font-size: 1rem; resize: vertical; min-height: 90px; }}
+  .row {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-top: 16px; }}
+  select, input {{ width: 100%; box-sizing: border-box; background: #0b0c10; border: 1px solid #45a29e; border-radius: 8px; color: #fff; padding: 10px; font-size: 0.95rem; }}
+  button {{ width: 100%; margin-top: 24px; padding: 14px; background: #66fcf1; color: #0b0c10; border: none; border-radius: 8px; font-size: 1.1rem; font-weight: 700; cursor: pointer; transition: all 0.2s; }}
+  button:hover:not(:disabled) {{ background: #45a29e; color: #fff; }}
+  button:disabled {{ opacity: 0.5; cursor: not-allowed; }}
+  #status {{ margin-top: 16px; font-size: 0.95rem; text-align: center; color: #66fcf1; min-height: 24px; }}
+  #preview {{ margin-top: 24px; text-align: center; }}
+  #preview img {{ max-width: 100%; border-radius: 8px; border: 1px solid #45a29e; box-shadow: 0 4px 16px rgba(0,0,0,0.6); }}
+  .download-btn {{ margin-top: 12px; display: inline-block; background: #66fcf1; color: #0b0c10; text-decoration: none; padding: 8px 16px; border-radius: 6px; font-size: 0.9rem; font-weight: 700; }}
+  .api-info {{ background: #0b0c10; border: 1px solid #45a29e; border-radius: 8px; padding: 16px; margin-top: 24px; font-size: 0.85rem; }}
+  code {{ color: #66fcf1; font-family: ui-monospace, SFMono-Regular, monospace; }}
+  pre {{ background: #1f2833; padding: 10px; border-radius: 6px; overflow-x: auto; margin-top: 8px; color: #e5e7eb; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>{MODEL_ALIAS} <span class="badge">ONLINE</span></h1>
+  <p class="subtitle">Stable Diffusion checkpoint running on Kaggle GPU via stable-diffusion.cpp</p>
+  
+  <label for="prompt">Prompt</label>
+  <textarea id="prompt" placeholder="e.g. A cinematic shot of an astronaut riding a white horse on Mars, photorealistic, 8k resolution"></textarea>
+  
+  <div class="row">
+    <div>
+      <label for="size">Resolution</label>
+      <select id="size">
+        <option value="512x512" selected>512 × 512</option>
+        <option value="768x768">768 × 768</option>
+        <option value="1024x1024">1024 × 1024</option>
+      </select>
+    </div>
+    <div>
+      <label for="steps">Inference Steps</label>
+      <select id="steps">
+        <option value="20" selected>20</option>
+        <option value="25">25</option>
+        <option value="30">30</option>
+        <option value="50">50</option>
+      </select>
+    </div>
+    <div>
+      <label for="seed">Seed (optional)</label>
+      <input id="seed" type="number" placeholder="Random">
+    </div>
+  </div>
+  
+  <button id="genBtn" onclick="generate()">Generate Image</button>
+  <div id="status"></div>
+  <div id="preview"></div>
+
+  <div class="api-info">
+    <strong>OpenAI-compatible Image Generation Endpoint:</strong>
+    <pre>POST /v1/images/generations
+Content-Type: application/json
+
+{{"prompt": "An astronaut on Mars", "size": "512x512", "response_format": "b64_json"}}</pre>
+  </div>
+</div>
+
+<script>
+async function generate() {{
+  const prompt = document.getElementById('prompt').value.trim();
+  if (!prompt) return alert('Please enter a prompt');
+  const size = document.getElementById('size').value;
+  const steps = parseInt(document.getElementById('steps').value);
+  const seedVal = document.getElementById('seed').value;
+  const btn = document.getElementById('genBtn');
+  const status = document.getElementById('status');
+  const preview = document.getElementById('preview');
+  
+  btn.disabled = true;
+  preview.innerHTML = '';
+  const startTime = Date.now();
+  status.textContent = 'Generating on GPU... (~10-30s)';
+  
+  try {{
+    const payload = {{ prompt, size, steps, response_format: 'b64_json' }};
+    if (seedVal) payload.seed = parseInt(seedVal);
+    const resp = await fetch('/v1/images/generations', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify(payload)
+    }});
+    if (!resp.ok) {{
+      const err = await resp.text();
+      throw new Error(`Server returned HTTP ${resp.status}: ${err}`);
+    }}
+    const data = await resp.json();
+    const b64 = data.data[0].b64_json;
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    status.textContent = `Completed in ${elapsed}s!`;
+    const imgSrc = 'data:image/png;base64,' + b64;
+    preview.innerHTML = `
+      <img src="${{imgSrc}}" alt="Generated Image"><br>
+      <a class="download-btn" href="${{imgSrc}}" download="${{MODEL_ALIAS}}-${{Date.now()}}.png">Download Full Resolution</a>
+    `;
+  }} catch (e) {{
+    status.textContent = 'Error: ' + e.message;
+  }} finally {{
+    btn.disabled = false;
+  }}
+}}
+</script>
+</body>
+</html>
+"""
+
+AUTH_USER = "__AUTH_USER__" or os.environ.get("CLUSTER_AUTH_USER", "")
+AUTH_PASS = "__AUTH_PASS__" or os.environ.get("CLUSTER_AUTH_PASS", "")
+AUTH_KEY = "__AUTH_KEY__" or os.environ.get("CLUSTER_API_KEY", "")
+AUTH_ENABLED = bool((AUTH_USER and AUTH_PASS) or AUTH_KEY)
+
+class ServerHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+
+    def _check_auth(self):
+        if not AUTH_ENABLED:
+            return True
+        path = self.path.split("?")[0].rstrip("/")
+        if path in ("/health", "/v1/health", "/healthz"):
+            return True
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Basic "):
+            try:
+                creds = base64.b64decode(auth[6:].strip()).decode("utf-8")
+                u, p = creds.split(":", 1)
+                if u == AUTH_USER and p == AUTH_PASS:
+                    return True
+            except Exception:
+                pass
+        elif auth.startswith("Bearer "):
+            token = auth[7:].strip()
+            if (AUTH_KEY and token == AUTH_KEY) or (AUTH_PASS and token == AUTH_PASS):
+                return True
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="AI Cluster Protected"')
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(b'{{"error": "Unauthorized: valid username and password required"}}\n')
+        return False
+
+    def _send_json(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.end_headers()
+
+    def do_HEAD(self):
+        if not self._check_auth(): return
+        self.do_GET()
+
+    def do_GET(self):
+        if not self._check_auth(): return
+        path = self.path.split("?")[0].rstrip("/")
+        if path in ("", "/index.html"):
+            body = HTML_PAGE.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path in ("/health", "/v1/health"):
+            self._send_json(200, {{
+                "status": "ok",
+                "model": MODEL_ALIAS,
+                "architecture": "stable-diffusion.cpp",
+                "device": "cuda"
+            }})
+        elif path in ("/models", "/v1/models"):
+            self._send_json(200, {{
+                "data": [{{
+                    "id": MODEL_ALIAS,
+                    "object": "model",
+                    "owned_by": "local"
+                }}]
+            }})
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        if not self._check_auth(): return
+        path = self.path.split("?")[0].rstrip("/")
+        if path == "/v1/images/generations":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            try:
+                req = json.loads(body)
+            except Exception:
+                self._send_json(400, {{"error": "Invalid JSON"}})
+                return
+            
+            prompt = req.get("prompt", "")
+            size = req.get("size", "512x512")
+            steps = int(req.get("steps", DEFAULT_STEPS))
+            seed = req.get("seed", -1)
+            response_format = req.get("response_format", "b64_json")
+            
+            if not prompt:
+                self._send_json(400, {{"error": "prompt is required"}})
+                return
+            
+            width, height = map(int, size.split("x"))
+            
+            # Generate using stable-diffusion.cpp via its REST API
+            sd_payload = {{
+                "prompt": prompt,
+                "steps": steps,
+                "width": width,
+                "height": height,
+                "batch_size": 1,
+            }}
+            if seed != -1:
+                sd_payload["seed"] = seed
+            
+            try:
+                sd_req = urllib.request.Request(
+                    f"http://127.0.0.1:{PORT}/v1/images/generations",
+                    data=json.dumps(sd_payload).encode(),
+                    headers={{"Content-Type": "application/json"}},
+                    method="POST"
+                )
+                with urllib.request.urlopen(sd_req, timeout=300) as sd_resp:
+                    sd_data = json.loads(sd_resp.read().decode())
+                
+                b64_img = sd_data.get("images", [{{}}])[0].get("b64_json", "")
+                if not b64_img:
+                    # Try alternative response format
+                    b64_img = sd_data.get("data", [{{}}])[0].get("b64_json", "")
+                
+                if not b64_img:
+                    self._send_json(500, {{"error": "No image generated"}})
+                    return
+                
+                self._send_json(200, {{
+                    "data": [{{
+                        "b64_json": b64_img,
+                        "revised_prompt": prompt
+                    }}]
+                }})
+            except Exception as e:
+                self._send_json(500, {{"error": f"Generation failed: {e}"}})
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), ServerHandler)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+print(f"OpenAI-compatible server running on port {PORT}", flush=True)
+
+# ---- publish both tunnels ----
+CF_TOKEN = "__CLOUDFLARE_TUNNEL_TOKEN__" or os.environ.get("CLOUDFLARE_TUNNEL_TOKEN", "")
+STATIC_URL = "__STATIC_URL__" or os.environ.get("CLUSTER_URL", "")
+
+def start_public_tunnel(url, log_path):
+    fh = open(log_path, "w")
+    if CF_TOKEN:
+        print("Starting named Cloudflare tunnel with token...", flush=True)
+        proc = subprocess.Popen([CF, "tunnel", "--no-autoupdate", "run", "--token", CF_TOKEN, "--url", url],
+                                stdout=fh, stderr=subprocess.STDOUT)
+        time.sleep(5)
+        if proc.poll() is not None:
+            fh.flush()
+            print("cloudflared failed to start! Log tail:", flush=True)
+            print(open(log_path).read()[-2000:], flush=True)
+            raise RuntimeError("named cloudflared tunnel exited immediately")
+        return STATIC_URL or "https://ai.883742.xyz"
+    else:
+        subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
+                         stdout=fh, stderr=subprocess.STDOUT)
+        for _ in range(60):
+            time.sleep(2)
+            m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open(log_path).read())
+            if m:
+                return m.group(0)
+        return None
+
+def start_tunnel(url, log_path):
+    fh = open(log_path, "w")
+    subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", url],
+                     stdout=fh, stderr=subprocess.STDOUT)
+    for _ in range(60):
+        time.sleep(2)
+        m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open(log_path).read())
+        if m:
+            return m.group(0)
+    return None
+
+public_url = start_public_tunnel(f"http://127.0.0.1:{PORT}", CF_LOG)
+control_url = start_tunnel(f"http://127.0.0.1:{CTL_PORT}", CTL_LOG)
+
+if not public_url:
+    print("cloudflared log:", open(CF_LOG).read()[-2000:], flush=True)
+    raise RuntimeError("could not obtain a public tunnel URL")
+if not control_url:
+    print("control cloudflared log:", open(CTL_LOG).read()[-2000:], flush=True)
+    raise RuntimeError("could not obtain a control tunnel URL")
+
+with open("/kaggle/working/CONTROL_URL.txt", "w") as f:
+    f.write(public_url + "\n")
+with open("/kaggle/working/STOP_URL.txt", "w") as f:
+    f.write(control_url + "/stop/" + STOP_TOKEN + "\n")
+
+print("=" * 72)
+print("CONTROL_URL=" + public_url)
+print("STOP_URL=" + control_url + "/stop/" + STOP_TOKEN)
+print("MODEL=" + MODEL_ALIAS)
+print("=" * 72)
+print(f"Web UI         : {public_url}")
+print(f"API endpoint   : {public_url}/v1/images/generations")
+print(f"Health         : {public_url}/health")
+print("Stop from PC   : ctr.sh stop   (uses the control tunnel above)")
+'''
+
+SD_CHECKPOINT_CELLS = [CELL_1_ENV, CELL_2_SD_CHECKPOINT_DEPS, CELL_3_SD_CHECKPOINT_SERVE, CELL_5_KEEPALIVE]
+
+
 XIAOMI_OCR_CELLS = [CELL_1_ENV, CELL_2_XIAOMI_DEPS, CELL_3_XIAOMI_SERVE, CELL_5_KEEPALIVE]
