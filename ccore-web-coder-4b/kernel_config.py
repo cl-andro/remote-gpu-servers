@@ -9,7 +9,7 @@ CFG = {
     "__MODEL_TYPE__": "llm",
 
     # --- model (downloaded ON KAGGLE) ---
-    "__MODEL_REPO__": "ccore/CCORE-Web-Coder-4B-GGUF",
+    "__MODEL_REPO__": "ccore/CCORE-Web-Coder-4B",
     "__MODEL_FILE__": "ccore-web-coder-Q8_0.gguf",
     "__MODEL_SIZE_GB__": "4.48",
     "__MODEL_ALIAS__": "ccore-web-coder-4b",
@@ -30,8 +30,9 @@ CFG = {
     "__SERVE_MINUTES__": "660",
 
     # --- optional vision projector (mmproj) ---
-    "__MMPROJ_FILE__": "",
-    "__MMPROJ_SIZE_GB__": "",
+    "__MMPROJ_REPO__": "ccore/CCORE-Web-Coder-4B",
+    "__MMPROJ_FILE__": "mmproj-Qwen3.5-4B-Base-F16.gguf",
+    "__MMPROJ_SIZE_GB__": "0.64",
     "__DRAFT_FILE__": "",
     "__DRAFT_SIZE_GB__": "",
 }
