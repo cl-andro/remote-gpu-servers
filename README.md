@@ -66,6 +66,7 @@ sessions, ~30 GPU-h/week). Sizes are the quantized GGUF weights.
 | [`qwen3.8-flash-next/`](qwen3.8-flash-next/) | Qwen3.8-Flash-Next (Alibaba) | MoE 125B / 6B active + vision (REAP25 UD-IQ4_XS) | 18.9 GB | 32k (256k native) | 🚀 Qwen4 preview: hybrid QSA + GDN linear attention, deep reasoning & vision |
 | [`qwen3.8-27b/`](qwen3.8-27b/) | Qwen3.8-27B (Alibaba) | Dense 27B + vision (UD-Q4_K_XL) | 18.5 GB | 32k | 👁️ Hybrid linear-attention dense vision-language & reasoning |
 | [`daisyrose-27b/`](daisyrose-27b/) | DaisyRose-27B (RadixArk) | Dense 27B + vision (Q4_K_XL) | 18.6 GB | 64k | 🏆 RL-trained reasoning, coding, agent tasks, vision |
+| [`inkling-2-mini/`](inkling-2-mini/) | Inkling-2-Mini (Thinking Machines) | Looped MoE 26B / 3.4B active + vision (UD-Q4_K_XL) | 17.6 GB | 1M | 🧠 Looped MoE, 48 layer applications, SOTA coding/agent |
 | [`sensenova-loop-9b/`](sensenova-loop-9b/) | SenseNova-Loop-9B (SenseNova) | Looped 9B + vision (Q4_K_M) | 5.5 GB | 512k | 🔄 Looped architecture, 56 layer executions, 3D/SVG/web gen |
 | [`qwen2.5-vl-7b/`](qwen2.5-vl-7b/) | Qwen2.5-VL-7B-Instruct | 7B + mmproj F16 | 5.6 GB | 32k | Scanned documents, OCR, charts & screen grounding |
 | [`minicpm-v-2_6/`](minicpm-v-2_6/) | MiniCPM-V-2.6 | 8B + mmproj F16 | 5.3 GB | 32k | High-res table extraction & multi-image comparison |
