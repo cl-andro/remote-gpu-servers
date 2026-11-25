@@ -76,7 +76,6 @@ sessions, ~30 GPU-h/week). Sizes are the quantized GGUF weights.
 | Project | Model | Type | Size | Context | Best for |
 | --- | --- | --- | --- | --- | --- |
 | [`ternary-bonsai-2.5-27b/`](ternary-bonsai-2.5-27b/) | Ternary-Bonsai-2.5-27B (Prism ML) | Ternary 27B (Q2_0) | 7.5 GB | 131k | 🏆 FP16-level agentic tool calling (77.2), 90% FP16 coding, 1.76 bits/w |
-| [`ternary-bonsai-2.5-27b-uncensored/`](ternary-bonsai-2.5-27b-uncensored/) | Ternary-Bonsai-2.5-27B-Uncensored (AtomicChat) | Ternary 27B (PTQ1_0) | 6.0 GB | 131k | 🚫 Uncensored, compact PTQ1_0 (5.99 GB), 81.2% MMLU, needs PrismML fork |
 | [`hermes-3-8b/`](hermes-3-8b/) | Hermes-3-Llama-3.1-8B | Dense 8B (Q4_K_M) | 4.6 GB | 32k | Autonomous agents, structured JSON & tool calling |
 | [`gpt-oss-20b/`](gpt-oss-20b/) | gpt-oss-20b | MoE 21B / 3.6B active | 12.1 GB | 65k | Lightweight MoE agentic loop, low memory footprint |
 | [`nemotron-3.5-lightning-30b/`](nemotron-3.5-lightning-30b/) | Nemotron-3.5-Lightning-30B-A3B (NVIDIA) | Mamba-2 + MoE 30B / 3B active (Q4_0) | 18.9 GB | 32k (1M native) | ⚡ Fast hybrid MoE: reasoning, tool use & long context |
