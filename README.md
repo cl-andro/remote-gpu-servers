@@ -76,6 +76,9 @@ sessions, ~30 GPU-h/week). Sizes are the quantized GGUF weights.
 | Project | Model | Type | Size | Context | Best for |
 | --- | --- | --- | --- | --- | --- |
 | [`ternary-bonsai-2.5-27b/`](ternary-bonsai-2.5-27b/) | Ternary-Bonsai-2.5-27B (Prism ML) | Ternary 27B (Q2_0) | 7.5 GB | 131k | 🏆 FP16-level agentic tool calling (77.2), 90% FP16 coding, 1.76 bits/w |
+| [`gemma-4-31b-heretic/`](gemma-4-31b-heretic/) | Gemma 4 31B Heretic (coder3101) | Dense 31B (i1-Q4_K_M) + vision | 19.4 GB | 131k | 🔓 Uncensored, i1 quants, vision, reasoning modes |
+| [`qwen3.8-40b-heretic/`](qwen3.8-40b-heretic/) | Qwen 3.8 40B Heretic (DavidAU) | Dense 40B (i1-Q3_K_S) + vision | 18.1 GB | 131k | 🔓 Uncensored, 27 reasoning modes, creative writing |
+| [`ripple-65b-abliterated/`](ripple-65b-abliterated/) | Ripple 65B Abliterated (OrcaRouter) | Dense 65B (Mix-3bit) | 24.0 GB | 131k | 🔓 Abliterated, mixed-precision, agentic coding |
 | [`hermes-3-8b/`](hermes-3-8b/) | Hermes-3-Llama-3.1-8B | Dense 8B (Q4_K_M) | 4.6 GB | 32k | Autonomous agents, structured JSON & tool calling |
 | [`gpt-oss-20b/`](gpt-oss-20b/) | gpt-oss-20b | MoE 21B / 3.6B active | 12.1 GB | 65k | Lightweight MoE agentic loop, low memory footprint |
 | [`nemotron-3.5-lightning-30b/`](nemotron-3.5-lightning-30b/) | Nemotron-3.5-Lightning-30B-A3B (NVIDIA) | Mamba-2 + MoE 30B / 3B active (Q4_0) | 18.9 GB | 32k (1M native) | ⚡ Fast hybrid MoE: reasoning, tool use & long context |
